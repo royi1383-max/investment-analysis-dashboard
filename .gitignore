@@ -1,0 +1,24 @@
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime / generated app state (not source)
+.wp_cache.json
+.wp_history.json
+.paper_portfolios.json
+.alerts.json
+
+# Local Claude Code settings
+.claude/
+
+# Archives / previews (not needed in the repo)
+*.zip
+_zip_preview/
+
+# Redundant local launcher (Hebrew) — use setup_and_run.bat instead
+הפעל_דשבורד.bat
