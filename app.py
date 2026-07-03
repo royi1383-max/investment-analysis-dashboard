@@ -4093,11 +4093,11 @@ elif page == "📰 News Feed":
         ))
         _fig_sm.update_layout(
             barmode="stack",
-            height=260,
-            margin=dict(l=0, r=0, t=36, b=0),
+            height=290,
+            margin=dict(l=0, r=0, t=70, b=0),
             title=dict(
                 text="News Sentiment Momentum — by Month",
-                font=dict(size=13, color="#cdd6f4"), x=0,
+                font=dict(size=13, color="#cdd6f4"), x=0, y=1.0, yanchor="top",
             ),
             plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
             font=dict(color="#cdd6f4", size=11),
@@ -4111,7 +4111,7 @@ elif page == "📰 News Feed":
                 showgrid=False, color="#4da3ff",
                 zeroline=True, zerolinecolor="#2a3348",
             ),
-            legend=dict(orientation="h", yanchor="bottom", y=1.08, x=0),
+            legend=dict(orientation="h", yanchor="bottom", y=1.15, x=0),
             hovermode="x unified",
         )
         st.plotly_chart(_fig_sm, use_container_width=True, config={"displayModeBar": False})
