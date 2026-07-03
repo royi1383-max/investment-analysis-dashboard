@@ -11,6 +11,7 @@ A growth-focused stock & ETF research tool built with Python and Streamlit. Comb
 - **Institutional & insider data** — SEC 13F filings, institutional holdings
 - **Options & analyst data** — options flow, earnings, analyst estimates (via Finnhub)
 - **AI-assisted tools** — AI stock screener and an "expert panel" view using the Anthropic API
+- **Agent Mode** — an agentic portfolio builder that uses real Claude tool use: instead of recalling tickers from memory, Claude calls a `get_stock_metrics` tool mid-conversation to pull live price/valuation/momentum data for each candidate before deciding whether to include it
 - **Portfolio tools** — paper portfolio simulation, portfolio health checks, price alerts, backtesting
 - **Weekly picks** — a recurring screen for candidate ideas
 

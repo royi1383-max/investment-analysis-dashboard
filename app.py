@@ -4194,8 +4194,14 @@ elif page == "🔎 AI Screener":
         st.stop()
 
     # ── Mode toggle ───────────────────────────────────────────────────────────
-    mode = st.radio("Mode", ["🔍 Screen Stocks", "💼 Build Portfolio"],
+    mode = st.radio("Mode", ["🔍 Screen Stocks", "💼 Build Portfolio", "🤖 Agent Mode"],
                     horizontal=True, label_visibility="collapsed")
+    if mode == "🤖 Agent Mode":
+        st.caption(
+            "Claude actively looks up live data (price, valuation, growth, momentum) for each "
+            "candidate via a tool call before deciding whether to include it — not just recalling "
+            "tickers from memory."
+        )
     st.markdown("---")
 
     # ── Example prompts ───────────────────────────────────────────────────────
@@ -4229,21 +4235,32 @@ elif page == "🔎 AI Screener":
     if query:
         st.session_state["screener_query"] = query
 
-    run_btn = st.button(
-        "🔍 Screen" if mode == "🔍 Screen Stocks" else "💼 Build Portfolio",
-        type="primary", disabled=not (query or "").strip()
-    )
+    run_btn_label = {
+        "🔍 Screen Stocks": "🔍 Screen",
+        "💼 Build Portfolio": "💼 Build Portfolio",
+        "🤖 Agent Mode": "🤖 Run Agent",
+    }[mode]
+    run_btn = st.button(run_btn_label, type="primary", disabled=not (query or "").strip())
 
     # ════════════════════════════════════════════════════════════════════════
-    # PORTFOLIO BUILDER MODE
+    # PORTFOLIO BUILDER MODE (with or without live tool-use agent)
     # ════════════════════════════════════════════════════════════════════════
-    if run_btn and mode == "💼 Build Portfolio" and query.strip():
-        with st.spinner("Claude is designing your portfolio..."):
-            port = mod_screen.build_portfolio(query)
+    if run_btn and mode in ("💼 Build Portfolio", "🤖 Agent Mode") and query.strip():
+        spinner_text = ("Claude is researching live data and designing your portfolio..."
+                         if mode == "🤖 Agent Mode" else "Claude is designing your portfolio...")
+        with st.spinner(spinner_text):
+            port = (mod_screen.build_portfolio_agentic(query) if mode == "🤖 Agent Mode"
+                    else mod_screen.build_portfolio(query))
 
         if "error" in port:
             st.error(port["error"])
             st.stop()
+
+        if port.get("tickers_researched_live"):
+            st.success(
+                "🔎 Agent looked up live data for: "
+                + ", ".join(port["tickers_researched_live"])
+            )
 
         # Header
         risk_color = {"Conservative":"#16c784","Moderate":"#f0b90b","Aggressive":"#ea3a44"}.get(

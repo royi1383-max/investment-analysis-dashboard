@@ -214,6 +214,117 @@ Respond ONLY with JSON:
         return {"error": str(e)}
 
 
+# ── Claude: agentic portfolio builder (real tool use) ─────────────────────────
+# Unlike build_portfolio() above, Claude does not just recall tickers from
+# memory — it can call get_stock_metrics() mid-conversation to pull live
+# fundamentals/technicals for any candidate before deciding to include it.
+_PORTFOLIO_TOOLS = [
+    {
+        "name": "get_stock_metrics",
+        "description": (
+            "Fetch live fundamental, technical, and momentum metrics for a single "
+            "US-listed stock or ETF ticker (price, forward P/E, revenue growth, "
+            "gross margin, RSI, moving averages, etc). Use this to verify a "
+            "candidate before including it in the portfolio — do not rely on "
+            "memory for current prices or growth rates, they may be stale."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Exact ticker symbol, e.g. AAPL"},
+            },
+            "required": ["ticker"],
+        },
+    }
+]
+
+_AGENT_SYSTEM_PROMPT = """You are building a real investment portfolio using live tools, not memory alone.
+
+Process:
+1. Think of 6-12 candidate tickers that fit the user's request.
+2. For EACH serious candidate, call get_stock_metrics to check its current price, valuation, growth, and momentum before deciding whether to include it. Prices and fundamentals from memory can be stale or wrong — always verify.
+3. Once you've researched enough candidates, select 4-8 for the final portfolio.
+
+Rules:
+- Weights must sum to exactly 100%.
+- Be specific and opinionated — explain WHY each stock for THIS theme, referencing the actual metrics you looked up.
+- Consider momentum leaders, not just the biggest names.
+- Consider risk: add a hedge or diversifier if the theme is concentrated.
+- Always respond in English regardless of the user's input language.
+
+When finished researching, respond with ONLY this JSON (no markdown, no more tool calls):
+{
+  "theme": "<portfolio name/theme - 3-6 words>",
+  "thesis": "<2-3 sentences: the investment thesis and why now>",
+  "time_horizon": "<short/medium/long-term>",
+  "risk_level": "<Conservative|Moderate|Aggressive>",
+  "positions": [
+    {
+      "ticker": "<exact ticker>",
+      "weight": <integer % - all must sum to 100>,
+      "role": "<Core|Satellite|Hedge|Growth|Value>",
+      "rationale": "<1-2 sentences citing the actual metrics you looked up>"
+    }
+  ],
+  "key_risks": ["<risk 1>", "<risk 2>"],
+  "rebalance_trigger": "<what event/condition would cause you to change this portfolio>"
+}"""
+
+
+def build_portfolio_agentic(user_query: str, max_tool_rounds: int = 6) -> dict:
+    """Same output shape as build_portfolio(), but Claude actively looks up live
+    data via the get_stock_metrics tool before finalizing positions, instead of
+    only recalling tickers from training data."""
+    if not ANTHROPIC_API_KEY:
+        return {"error": "ANTHROPIC_API_KEY not configured"}
+
+    client = _get_client()
+    messages = [{
+        "role": "user",
+        "content": f'Request: "{user_query}"\n\nResearch candidates with the tool, then propose the portfolio.',
+    }]
+    researched: list[str] = []
+    resp = None
+
+    for _ in range(max_tool_rounds):
+        try:
+            resp = client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=2500,
+                system=_AGENT_SYSTEM_PROMPT, tools=_PORTFOLIO_TOOLS, messages=messages,
+            )
+        except Exception as e:
+            return {"error": str(e)}
+
+        messages.append({"role": "assistant", "content": resp.content})
+
+        if resp.stop_reason != "tool_use":
+            break
+
+        tool_results = []
+        for block in resp.content:
+            if getattr(block, "type", None) == "tool_use" and block.name == "get_stock_metrics":
+                ticker = str(block.input.get("ticker", "")).upper().strip()
+                data = fetch_stock_data(ticker) if ticker else None
+                researched.append(ticker)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(data) if data else json.dumps({"error": f"No data found for {ticker}"}),
+                })
+        messages.append({"role": "user", "content": tool_results})
+    else:
+        return {"error": "Agent exceeded max tool-call rounds without finishing."}
+
+    final_text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), "")
+    try:
+        result = json.loads(_strip_json_markdown(final_text))
+    except Exception as e:
+        return {"error": f"Failed to parse final answer: {e}", "raw": final_text}
+
+    result["tickers_researched_live"] = researched
+    return result
+
+
 # ── Apply filters to fetched data ─────────────────────────────────────────────
 def apply_filters(stocks: list[dict], filters: dict) -> list[dict]:
     results = []
