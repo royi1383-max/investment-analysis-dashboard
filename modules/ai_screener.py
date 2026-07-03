@@ -26,6 +26,16 @@ def _strip_json_markdown(raw: str) -> str:
     return raw
 
 
+def _extract_json(raw: str) -> str:
+    """Like _strip_json_markdown, but also drops any leading/trailing prose
+    Claude adds around the JSON (e.g. "Here's the portfolio:\n\n{...}")."""
+    raw = _strip_json_markdown(raw)
+    start, end = raw.find("{"), raw.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return raw[start:end + 1]
+    return raw
+
+
 # Module-level client — created once
 _client: anthropic.Anthropic | None = None
 
@@ -160,7 +170,7 @@ Respond ONLY with valid JSON (no markdown):
             messages=[{"role": "user", "content": prompt}]
         )
         raw = msg.content[0].text.strip()
-        raw = _strip_json_markdown(raw)
+        raw = _extract_json(raw)
         return json.loads(raw)
     except Exception as e:
         return {"error": str(e)}
@@ -208,7 +218,7 @@ Respond ONLY with JSON:
             messages=[{"role": "user", "content": prompt}]
         )
         raw = msg.content[0].text.strip()
-        raw = _strip_json_markdown(raw)
+        raw = _extract_json(raw)
         return json.loads(raw)
     except Exception as e:
         return {"error": str(e)}
@@ -340,9 +350,10 @@ def build_portfolio_agentic(user_query: str, max_tool_rounds: int = 6) -> dict:
         return {"error": f"Agent produced no final answer (stop_reason={resp.stop_reason})."}
 
     try:
-        result = json.loads(_strip_json_markdown(final_text))
+        result = json.loads(_extract_json(final_text))
     except Exception as e:
-        return {"error": f"Failed to parse final answer: {e}", "raw": final_text}
+        preview = final_text[:300]
+        return {"error": f"Failed to parse final answer: {e} — response started with: {preview!r}", "raw": final_text}
 
     result["tickers_researched_live"] = researched
     return result
