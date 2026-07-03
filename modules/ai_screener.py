@@ -289,7 +289,7 @@ def build_portfolio_agentic(user_query: str, max_tool_rounds: int = 6) -> dict:
     for _ in range(max_tool_rounds):
         try:
             resp = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=2500,
+                model="claude-sonnet-4-6", max_tokens=4096,
                 system=_AGENT_SYSTEM_PROMPT, tools=_PORTFOLIO_TOOLS, messages=messages,
             )
         except Exception as e:
@@ -315,7 +315,30 @@ def build_portfolio_agentic(user_query: str, max_tool_rounds: int = 6) -> dict:
     else:
         return {"error": "Agent exceeded max tool-call rounds without finishing."}
 
-    final_text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), "")
+    def _text_of(response) -> str:
+        return "".join(b.text for b in response.content if getattr(b, "type", None) == "text").strip()
+
+    final_text = _text_of(resp)
+
+    # Claude sometimes stops (e.g. hits its token budget mid-thought) without
+    # emitting the final JSON. Nudge it once to just output the answer.
+    if not final_text:
+        messages.append({
+            "role": "user",
+            "content": "Output ONLY the final JSON now, no other text.",
+        })
+        try:
+            resp = client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=4096,
+                system=_AGENT_SYSTEM_PROMPT, tools=_PORTFOLIO_TOOLS, messages=messages,
+            )
+            final_text = _text_of(resp)
+        except Exception as e:
+            return {"error": str(e)}
+
+    if not final_text:
+        return {"error": f"Agent produced no final answer (stop_reason={resp.stop_reason})."}
+
     try:
         result = json.loads(_strip_json_markdown(final_text))
     except Exception as e:
