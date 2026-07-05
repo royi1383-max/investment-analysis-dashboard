@@ -30,6 +30,7 @@ import modules.historical    as mod_hist
 import modules.ai_screener   as mod_screen
 import modules.market_health    as mod_mhealth
 import modules.finnhub_data     as mod_finnhub
+import modules.news_sources     as mod_news
 import modules.portfolio_health as mod_phealth
 import modules.weekly_picks     as mod_weekly
 import modules.sector_strength  as mod_sector_str
@@ -3969,12 +3970,8 @@ elif page == "📰 News Feed":
     st.title("📰 Unified News Feed")
     st.caption(
         "Latest news across your watchlist — sorted by date, filtered by sentiment. "
-        "Powered by Finnhub (requires FINNHUB_API_KEY)."
+        "Sources: Finnhub, Yahoo Finance, Seeking Alpha, StockTwits."
     )
-
-    if not FINNHUB_API_KEY:
-        st.warning("Add FINNHUB_API_KEY to .env to enable news feed.")
-        st.stop()
 
     DEFAULT_NF = ", ".join(["NVDA", "MSFT", "AAPL", "META", "GOOGL",
                             "AMZN", "TSLA", "AMD", "PLTR", "CRWD"])
@@ -3988,25 +3985,55 @@ elif page == "📰 News Feed":
         st.session_state["nf_symbols"] = nf_input
     nf_syms = [t.strip().upper() for t in nf_input.split(",") if t.strip()][:20]
 
+    _NF_ALL_SOURCES = ["Finnhub", "Yahoo Finance", "Seeking Alpha", "StockTwits"]
+    _NF_DEFAULT_SOURCES = [s for s in _NF_ALL_SOURCES if s != "Finnhub" or FINNHUB_API_KEY]
+    nf_sources = st.multiselect(
+        "Sources", _NF_ALL_SOURCES, default=_NF_DEFAULT_SOURCES,
+        label_visibility="collapsed",
+    )
+    if "Finnhub" in nf_sources and not FINNHUB_API_KEY:
+        st.warning("Add FINNHUB_API_KEY to .env to include Finnhub — continuing with the other sources.")
+        nf_sources = [s for s in nf_sources if s != "Finnhub"]
+
     _NF_SENT_OPTS = {"All": None, "Positive only": "positive",
                      "Negative only": "negative", "Neutral only": "neutral"}
     nf_col1, nf_col2 = st.columns([2, 1])
     with nf_col2:
         sent_filter = st.selectbox("Sentiment", list(_NF_SENT_OPTS.keys()))
     with nf_col1:
-        run_nf = st.button("🗞 Load News", type="primary", use_container_width=True)
+        run_nf = st.button("🗞 Load News", type="primary", use_container_width=True,
+                            disabled=not nf_sources)
 
     if run_nf:
         all_news = []
         prog_nf = st.progress(0, text="Fetching news…")
         for i, sym in enumerate(nf_syms):
             prog_nf.progress((i + 1) / len(nf_syms), text=f"Fetching {sym}…")
-            try:
-                fh = mod_finnhub.fetch_all(sym)
-                for n in fh.get("news", []):
-                    all_news.append({**n, "symbol": sym})
-            except Exception:
-                pass
+            if "Finnhub" in nf_sources:
+                try:
+                    fh = mod_finnhub.fetch_all(sym)
+                    for n in fh.get("news", []):
+                        all_news.append({**n, "symbol": sym})
+                except Exception:
+                    pass
+            if "Yahoo Finance" in nf_sources:
+                try:
+                    for n in mod_news.fetch_yahoo_news(sym):
+                        all_news.append({**n, "symbol": sym})
+                except Exception:
+                    pass
+            if "Seeking Alpha" in nf_sources:
+                try:
+                    for n in mod_news.fetch_seekingalpha_news(sym):
+                        all_news.append({**n, "symbol": sym})
+                except Exception:
+                    pass
+            if "StockTwits" in nf_sources:
+                try:
+                    for n in mod_news.fetch_stocktwits(sym):
+                        all_news.append({**n, "symbol": sym})
+                except Exception:
+                    pass
         prog_nf.empty()
         # Sort by raw timestamp descending
         all_news.sort(key=lambda x: x.get("url", ""), reverse=False)
