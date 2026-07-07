@@ -166,7 +166,8 @@ Respond ONLY with valid JSON (no markdown):
 
     try:
         msg = _get_client().messages.create(
-            model="claude-sonnet-4-6", max_tokens=1500,
+            model="claude-sonnet-5", max_tokens=1500,
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": prompt}]
         )
         raw = msg.content[0].text.strip()
@@ -214,7 +215,8 @@ Respond ONLY with JSON:
 
     try:
         msg = _get_client().messages.create(
-            model="claude-sonnet-4-6", max_tokens=2500,
+            model="claude-sonnet-5", max_tokens=2500,
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": prompt}]
         )
         raw = msg.content[0].text.strip()
@@ -299,7 +301,7 @@ def build_portfolio_agentic(user_query: str, max_tool_rounds: int = 6) -> dict:
     for _ in range(max_tool_rounds):
         try:
             resp = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=4096,
+                model="claude-sonnet-5", max_tokens=8192,
                 system=_AGENT_SYSTEM_PROMPT, tools=_PORTFOLIO_TOOLS, messages=messages,
             )
         except Exception as e:
@@ -339,7 +341,7 @@ def build_portfolio_agentic(user_query: str, max_tool_rounds: int = 6) -> dict:
         })
         try:
             resp = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=4096,
+                model="claude-sonnet-5", max_tokens=8192,
                 system=_AGENT_SYSTEM_PROMPT, tools=_PORTFOLIO_TOOLS, messages=messages,
             )
             final_text = _text_of(resp)

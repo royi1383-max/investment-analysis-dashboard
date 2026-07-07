@@ -457,8 +457,9 @@ def claude_portfolio_review(_fingerprint: str, holdings_json: str,
             f"Respond ONLY with the JSON object, no markdown fences."
         )
         resp = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
             max_tokens=1800,
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": prompt}],
         )
         raw = _strip_json(resp.content[0].text.strip())

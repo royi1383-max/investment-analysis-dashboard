@@ -94,8 +94,9 @@ Respond ONLY with a raw JSON object (no markdown, no code fences):
 
     try:
         msg = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
             max_tokens=8000,
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": prompt}],
         )
         raw = msg.content[0].text.strip()
