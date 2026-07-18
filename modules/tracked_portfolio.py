@@ -387,8 +387,9 @@ Respond ONLY with JSON:
   "cost_note": "<is rebalancing now worth the transaction cost? one sentence>"
 }}"""
         resp = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
             max_tokens=2500,
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": prompt}],
         )
         return json.loads(extract_json(resp.content[0].text))
