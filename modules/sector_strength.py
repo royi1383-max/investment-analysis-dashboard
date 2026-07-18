@@ -254,73 +254,94 @@ def get_sector_context(symbol: str) -> dict:
 
 # ── Sector Rotation ───────────────────────────────────────────────────────────
 
-# All 11 SPDR broad sectors + thematic sub-sectors for rotation view
-_ROTATION_SECTORS: list[tuple[str, str]] = [
+# (label, etf, category) — category powers the grouped bar-chart view.
+ROTATION_CATEGORIES = [
+    "Broad Sectors", "AI & Compute", "Tech Themes", "Healthcare",
+    "Finance & Crypto", "Energy & Power", "Industry & Defense",
+    "Consumer & Housing", "Commodities", "Geographies", "Styles",
+]
+
+_ROTATION_SECTORS: list[tuple[str, str, str]] = [
     # ── Broad SPDR Sectors ────────────────────────────────────────────────────
-    ("Technology",             "XLK"),
-    ("Communication",          "XLC"),
-    ("Consumer Discret.",      "XLY"),
-    ("Consumer Staples",       "XLP"),
-    ("Health Care",            "XLV"),
-    ("Financials",             "XLF"),
-    ("Energy",                 "XLE"),
-    ("Industrials",            "XLI"),
-    ("Materials",              "XLB"),
-    ("Real Estate",            "XLRE"),
-    ("Utilities",              "XLU"),
-    # ── AI & Tech Themes ──────────────────────────────────────────────────────
-    ("Semiconductors",         "SOXX"),
-    ("Software / SaaS",        "IGV"),
-    ("Cloud Computing",        "WCLD"),
-    ("Cybersecurity",          "CIBR"),
-    ("Robotics & AI",          "BOTZ"),
-    ("Internet / Social",      "PNQI"),
-    ("Gaming & Esports",       "HERO"),
-    # ── Healthcare Themes ─────────────────────────────────────────────────────
-    ("Biotech",                "XBI"),
-    ("MedTech Devices",        "IHI"),
-    ("Genomics",               "ARKG"),
-    ("Pharma",                 "XPH"),
-    # ── Finance & Payments ────────────────────────────────────────────────────
-    ("Fintech",                "FINX"),
-    ("Digital Payments",       "IPAY"),
-    ("Regional Banks",         "KRE"),
-    ("Bitcoin / Crypto",       "IBIT"),
-    # ── Energy Transition ─────────────────────────────────────────────────────
-    ("Clean Energy",           "ICLN"),
-    ("Solar Energy",           "TAN"),
-    ("Nuclear / Uranium",      "URA"),
-    # ── Industrials & Defense ─────────────────────────────────────────────────
-    ("Aerospace & Defense",    "ITA"),
-    ("Infrastructure",         "PAVE"),
-    ("Lithium & EV Battery",   "LIT"),
-    # ── Consumer & Macro ──────────────────────────────────────────────────────
-    ("E-Commerce",             "ONLN"),
-    ("Airlines & Travel",      "JETS"),
-    # ── Frontier Tech ─────────────────────────────────────────────────────────
-    ("Space",                  "ARKX"),
-    ("Quantum Computing",      "QTUM"),
-    ("Innovation (ARK)",       "ARKK"),
-    # ── Housing, Transport & Consumer ────────────────────────────────────────
-    ("Homebuilders",           "ITB"),
-    ("Retail",                 "XRT"),
-    ("Transportation",         "IYT"),
-    # ── Commodities & Resources ───────────────────────────────────────────────
-    ("Oil Services",           "OIH"),
-    ("Copper Miners",          "COPX"),
-    ("Agriculture",            "MOO"),
-    ("Water",                  "PHO"),
-    # ── Global & Commodities ──────────────────────────────────────────────────
-    ("Gold Miners",            "GDX"),
-    ("China Tech",             "KWEB"),
-    ("India",                  "INDA"),
-    ("Japan",                  "EWJ"),
-    ("Europe",                 "VGK"),
-    ("Emerging Markets",       "EEM"),
-    ("Israel",                 "EIS"),
+    ("Technology",             "XLK",  "Broad Sectors"),
+    ("Communication",          "XLC",  "Broad Sectors"),
+    ("Consumer Discret.",      "XLY",  "Broad Sectors"),
+    ("Consumer Staples",       "XLP",  "Broad Sectors"),
+    ("Health Care",            "XLV",  "Broad Sectors"),
+    ("Financials",             "XLF",  "Broad Sectors"),
+    ("Energy",                 "XLE",  "Broad Sectors"),
+    ("Industrials",            "XLI",  "Broad Sectors"),
+    ("Materials",              "XLB",  "Broad Sectors"),
+    ("Real Estate",            "XLRE", "Broad Sectors"),
+    ("Utilities",              "XLU",  "Broad Sectors"),
+    # ── AI & Compute (the AI supply chain, layer by layer) ────────────────────
+    ("Semiconductors",         "SOXX", "AI & Compute"),
+    ("Semis Equal-Weight (Memory)", "XSD", "AI & Compute"),
+    ("AI & Big Data",          "AIQ",  "AI & Compute"),
+    ("Data Center REITs",      "SRVR", "AI & Compute"),
+    ("Grid & Electrification", "GRID", "AI & Compute"),
+    ("Cloud Computing",        "WCLD", "AI & Compute"),
+    ("Robotics & AI",          "BOTZ", "AI & Compute"),
+    ("Quantum Computing",      "QTUM", "AI & Compute"),
+    # ── Tech Themes ───────────────────────────────────────────────────────────
+    ("Software / SaaS",        "IGV",  "Tech Themes"),
+    ("Cybersecurity",          "CIBR", "Tech Themes"),
+    ("Internet / Social",      "PNQI", "Tech Themes"),
+    ("Gaming & Esports",       "HERO", "Tech Themes"),
+    ("Space",                  "ARKX", "Tech Themes"),
+    ("Innovation (ARK)",       "ARKK", "Tech Themes"),
+    # ── Healthcare ────────────────────────────────────────────────────────────
+    ("Biotech",                "XBI",  "Healthcare"),
+    ("MedTech Devices",        "IHI",  "Healthcare"),
+    ("Genomics",               "ARKG", "Healthcare"),
+    ("Pharma (GLP-1 names)",   "XPH",  "Healthcare"),
+    # ── Finance & Crypto ──────────────────────────────────────────────────────
+    ("Fintech",                "FINX", "Finance & Crypto"),
+    ("Digital Payments",       "IPAY", "Finance & Crypto"),
+    ("Regional Banks",         "KRE",  "Finance & Crypto"),
+    ("Bitcoin",                "IBIT", "Finance & Crypto"),
+    ("Blockchain Stocks",      "BLOK", "Finance & Crypto"),
+    # ── Energy & Power (the AI-power trade included) ──────────────────────────
+    ("Clean Energy",           "ICLN", "Energy & Power"),
+    ("Solar Energy",           "TAN",  "Energy & Power"),
+    ("Nuclear / Uranium",      "URA",  "Energy & Power"),
+    ("Natural Gas Producers",  "FCG",  "Energy & Power"),
+    ("Oil Services",           "OIH",  "Energy & Power"),
+    # ── Industry & Defense ────────────────────────────────────────────────────
+    ("Aerospace & Defense",    "ITA",  "Industry & Defense"),
+    ("Infrastructure",         "PAVE", "Industry & Defense"),
+    ("Lithium & EV Battery",   "LIT",  "Industry & Defense"),
+    ("Transportation",         "IYT",  "Industry & Defense"),
+    # ── Consumer & Housing ────────────────────────────────────────────────────
+    ("E-Commerce",             "ONLN", "Consumer & Housing"),
+    ("Airlines & Travel",      "JETS", "Consumer & Housing"),
+    ("Homebuilders",           "ITB",  "Consumer & Housing"),
+    ("Retail",                 "XRT",  "Consumer & Housing"),
+    # ── Commodities ───────────────────────────────────────────────────────────
+    ("Gold Miners",            "GDX",  "Commodities"),
+    ("Silver Miners",          "SIL",  "Commodities"),
+    ("Copper Miners",          "COPX", "Commodities"),
+    ("Rare Earths",            "REMX", "Commodities"),
+    ("Agriculture",            "MOO",  "Commodities"),
+    ("Water",                  "PHO",  "Commodities"),
+    # ── Geographies ───────────────────────────────────────────────────────────
+    ("China Tech",             "KWEB", "Geographies"),
+    ("India",                  "INDA", "Geographies"),
+    ("Japan",                  "EWJ",  "Geographies"),
+    ("Taiwan",                 "EWT",  "Geographies"),
+    ("South Korea",            "EWY",  "Geographies"),
+    ("Vietnam",                "VNM",  "Geographies"),
+    ("Europe",                 "VGK",  "Geographies"),
+    ("Brazil",                 "EWZ",  "Geographies"),
+    ("Mexico",                 "EWW",  "Geographies"),
+    ("Argentina",              "ARGT", "Geographies"),
+    ("Latin America",          "ILF",  "Geographies"),
+    ("Saudi Arabia",           "KSA",  "Geographies"),
+    ("Israel",                 "EIS",  "Geographies"),
+    ("Emerging Markets",       "EEM",  "Geographies"),
     # ── Styles ────────────────────────────────────────────────────────────────
-    ("Small Cap Growth",       "IWO"),
-    ("Dividend Growth",        "VIG"),
+    ("Small Cap Growth",       "IWO",  "Styles"),
+    ("Dividend Growth",        "VIG",  "Styles"),
 ]
 
 
@@ -345,7 +366,7 @@ def get_sector_rotation() -> list[dict]:
         _sc, _spy_r3m = None, 0.0
 
     results = []
-    for label, etf in _ROTATION_SECTORS:
+    for label, etf, category in _ROTATION_SECTORS:
         s = _etf_strength(etf)
         if not s:
             continue
@@ -376,6 +397,7 @@ def get_sector_rotation() -> list[dict]:
         results.append({
             "label":        label,
             "etf":          etf,
+            "category":     category,
             "price":        s.get("price"),
             "r1m":          s.get("r1m", 0),
             "r3m":          s.get("r3m", 0),

@@ -636,6 +636,12 @@ def render_ticker_tape():
     )
 
 
+
+def _page_about(md: str) -> None:
+    """Educational 'About this page' expander — essence, calculation, usage."""
+    with st.expander("ⓘ About this page — what, how it's computed, how to use"):
+        st.markdown(md)
+
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("📈 Stock Analyzer")
@@ -780,6 +786,9 @@ _components.html("""
 # ─── Page: Analyze ────────────────────────────────────────────────────────────
 if page == "🔍 Analyze":
     st.title("🔍 Deep Stock Analysis")
+    _page_about("""**What:** the full research workstation for one stock — 11 tabs from price action to DCF to fund rulebooks.
+**How:** 6 scoring engines (fundamental, technical, momentum, institutional, macro, relative) blend into one composite; every metric in the 🎯 In-Context panel is judged against THIS stock's sector, size, growth and the market regime — never against naive universal thresholds.
+**Use:** suggested flow — Overview for the verdict → Fundamentals for quality + context → Technical for timing → Experts + Panel Verdict for the decision → Risk & Sizing for HOW MUCH to buy. A great stock at the wrong size is still a mistake.""")
 
     col_input, col_btn = st.columns([4, 1])
     with col_input:
@@ -2817,6 +2826,11 @@ if page == "🔍 Analyze":
                        "How would each discipline treat this stock right now?")
 
             _fm = mod_fm.analyze_stock(symbol)
+            _tip_minervini_method = _html.escape(mod_gloss.TIP["minervini_method"], quote=True)
+            _tip_turtle_method = _html.escape(mod_gloss.TIP["turtle_method"], quote=True)
+            _tip_trend_following_method = _html.escape(mod_gloss.TIP["trend_following_method"], quote=True)
+            _tip_druckenmiller_method = _html.escape(mod_gloss.TIP["druckenmiller_method"], quote=True)
+            _tip_kelly_method = _html.escape(mod_gloss.TIP["kelly_method"], quote=True)
             if _fm.get("error"):
                 st.info(f"Fund models unavailable: {_fm['error']}")
             else:
@@ -2829,7 +2843,8 @@ if page == "🔍 Analyze":
                     _min_c = "#16c784" if _min_pass == 7 else ("#f0b90b" if _min_pass >= 5 else "#ea3a44")
                     st.markdown(
                         f'<div style="background:#161b27;border:1px solid #2a3348;border-left:4px solid {_min_c};'
-                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px">'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" '
+                        f'title="{_tip_minervini_method}">'
                         f'<div style="font-weight:700;color:#e8edf8;margin-bottom:2px">'
                         f'📈 Minervini Trend Template <span style="color:{_min_c}">'
                         f'{_min_pass}/{_min["total"]}</span></div>'
@@ -2846,7 +2861,7 @@ if page == "🔍 Analyze":
                     _tur = _fm["turtle"]
                     st.markdown(
                         f'<div style="background:#161b27;border:1px solid #2a3348;'
-                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px">'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_turtle_method}">'
                         f'<div style="font-weight:700;color:#e8edf8;margin-bottom:6px">🐢 Turtle Breakout Rules</div>'
                         f'<div style="font-size:12px;color:#cdd6f4">System 1 (20d): {_tur["s1"]}</div>'
                         f'<div style="font-size:12px;color:#cdd6f4">System 2 (55d): {_tur["s2"]}</div>'
@@ -2864,7 +2879,7 @@ if page == "🔍 Analyze":
                              "MIXED": "#f0b90b"}.get(_tr["signal"], "#556070")
                     st.markdown(
                         f'<div style="background:#161b27;border:1px solid #2a3348;'
-                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px">'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_trend_following_method}">'
                         f'<div style="font-weight:700;color:#e8edf8;margin-bottom:4px">'
                         f'📉 Managed-Futures Trend: <span style="color:{_tr_c}">{_tr["signal"]}</span></div>'
                         f'<div style="font-size:12px;color:#8a9bc2">{_tr["detail"]}</div>'
@@ -2877,7 +2892,7 @@ if page == "🔍 Analyze":
                     _dr = _fm["druck"]
                     st.markdown(
                         f'<div style="background:#161b27;border:1px solid #2a3348;'
-                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px">'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_druckenmiller_method}">'
                         f'<div style="font-weight:700;color:#e8edf8;margin-bottom:4px">🎯 Druckenmiller Playbook</div>'
                         f'<div style="font-size:12px;color:#f0b90b;margin-bottom:8px">{_dr["verdict"]}</div>'
                         + "".join(f'<div style="font-size:12px;color:#cdd6f4;padding:1px 0">{e} {m}</div>'
@@ -2892,7 +2907,7 @@ if page == "🔍 Analyze":
                         _ke_c = "#16c784" if _ke["kelly"] > 0 else "#ea3a44"
                         st.markdown(
                             f'<div style="background:#161b27;border:1px solid #2a3348;'
-                            f'border-radius:8px;padding:14px 18px;margin-bottom:10px">'
+                            f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_kelly_method}">'
                             f'<div style="font-weight:700;color:#e8edf8;margin-bottom:6px">🎲 Kelly Position Sizing</div>'
                             f'<div style="font-size:12px;color:#cdd6f4">'
                             f'Monthly win rate <b>{_ke["win_rate"]}%</b> · payoff ratio <b>{_ke["payoff"]}</b> '
@@ -2931,7 +2946,7 @@ if page == "🔍 Analyze":
                     )
                     st.plotly_chart(_fig_rad, use_container_width=True,
                                     config={"displayModeBar": False})
-                    st.markdown("**Style fit:**")
+                    st.markdown("**Style fit:**", help=mod_gloss.TIP["factor_method"])
                     for _sf in _fac["style_fits"]:
                         st.markdown(f"- {_sf}")
 
@@ -3081,6 +3096,9 @@ if page == "🔍 Analyze":
 # ─── Page: Market Radar ────────────────────────────────────────────────────────
 elif page == "🌍 Market Radar":
     st.title("🌍 Market Radar — Growth Opportunities")
+    _page_about("""**What:** a fixed watchlist of under-the-radar growth candidates + an insider cluster-buy scanner.
+**How:** each candidate gets live price/momentum/fundamental snapshot; filters are yours. The insider scanner ranks stocks by 3-month average MSPR (net insider buying) — clusters (≥+20 for 3 months) are the strongest legal signal.
+**Use:** radar = idea generation. Anything interesting goes through the full Analyze pipeline first.""")
     st.caption("Scanning for high-momentum growth stocks and ETFs with strong fundamentals.")
 
     # ── 👤 Insider Cluster Buys scanner ───────────────────────────────────────
@@ -3265,6 +3283,9 @@ elif page == "🌍 Market Radar":
 # ─── Page: Portfolio ──────────────────────────────────────────────────────────
 elif page == "💼 Portfolio":
     st.title("💼 My Portfolio")
+    _page_about("""**What:** upload your real broker positions (CSV/Excel, including Israeli broker format) and get live valuation, risk metrics and an AI health check.
+**How:** positions enriched with live prices; risk section computes beta, volatility, max drawdown, VaR-95 and pairwise correlations from 1y daily returns; health check scores each holding and flags TRIM/EXIT candidates.
+**Use:** the correlation heatmap is the most underrated view — 10 positions with 0.9 correlation are ONE bet. Export to Excel for records.""")
     st.caption("Upload your broker's CSV export or a standard CSV (Ticker, Shares, Avg Price).")
 
     col_up, col_dl = st.columns([3, 1])
@@ -3840,6 +3861,9 @@ elif page == "💼 Portfolio":
 # ─── Page: Watchlist ──────────────────────────────────────────────────────────
 elif page == "👁 Watchlist":
     st.title("👁 Watchlist")
+    _page_about("""**What:** quick composite scores for a list of tickers you're stalking — saved to disk, survives restarts.
+**How:** each ticker gets fundamental + technical + momentum scores (same engines as Analyze, macro/smart-money pillars neutral at 5), blended into one 1-10 score.
+**Use:** a triage table — sort by score, deep-dive the top in Analyze. Watchlist symbols also feed the earnings-alert scanner automatically.""")
     st.caption("Track multiple tickers with quick scores. Your list is saved to disk automatically.")
 
     # Persisted to .watchlist.json — survives refresh and app restarts
@@ -3915,6 +3939,9 @@ elif page == "⭐ Weekly Picks":
     import datetime as _dt_wp
     _wp_week_num = _dt_wp.date.today().isocalendar()[1]
     st.title("⭐ Weekly Buy Recommendations")
+    _page_about("""**What:** an automatic scanner that surfaces stocks in BUYABLE condition *this week* — not just good companies.
+**How:** 60 stocks scanned (30 anchor + 30 rotating weekly from 223); each scored on 5 pillars — model (fundamentals+technicals+momentum), analyst consensus, options flow, breakout setup, momentum bonus. Entry requires ≥4 of 6 conditions at thresholds set by the market regime (stricter in RISK-OFF). Repeat picks get a recency penalty; max 2 per sector.
+**Use:** treat picks as a curated shortlist for deep-dive in Analyze — not as blind buy orders. The regime banner tells you how aggressive the environment allows you to be.""")
     st.caption(
         f"Week {_wp_week_num} · Scanning 60 / {len(set(WEEKLY_UNIVERSE))} stocks this week "
         f"(30 anchor + 30 rotating across 17 themes) · "
@@ -4370,6 +4397,9 @@ elif page == "⭐ Weekly Picks":
 # ─── Page: Alerts ─────────────────────────────────────────────────────────────
 elif page == "🔔 Alerts":
     st.title("🔔 Price & RSI Alerts")
+    _page_about("""**What:** persistent price/RSI alerts + automatic earnings-date notifications for everything you track.
+**How:** checks run every ~5 minutes while the app is open (price vs threshold; RSI-14 vs threshold). Earnings alerts scan your watchlist + paper holdings against the Finnhub calendar 7 days ahead — each report notifies once.
+**Use:** set alerts at DECISION levels (support, stop, target) — not random numbers. An alert should mean 'when this fires, I already know what I'll do'.""")
     st.caption("Set alerts that trigger when a stock hits your target price or RSI level. Alerts persist across restarts.")
 
     # ── Add new alert ─────────────────────────────────────────────────────
@@ -4473,6 +4503,9 @@ elif page == "🔔 Alerts":
 # ─── Page: Market Health ─────────────────────────────────────────────────────
 elif page == "🏥 Market Health":
     st.title("🏥 Market Health Dashboard")
+    _page_about("""**What:** the macro backdrop in one composite — should you be aggressive or defensive right now?
+**How:** 9 indicators (VIX, yield curve, Fed rate, CPI, unemployment, credit spreads, dollar, gold-vs-trend, S&P trend) each classified green/yellow/red, then blended into a weighted 0-100 composite. Above 70 = risk-on; below 40 = defense.
+**Use:** this sets position SIZING and aggressiveness, not stock picks. Great stock + hostile macro = smaller size, wider stops.""")
     st.caption("Real-time macro & sentiment indicators to assess market conditions and timing for new investments.")
 
     col_ref, col_load = st.columns([4, 1])
@@ -4630,25 +4663,41 @@ elif page == "🔄 Sector Rotation":
         st.info("No sector data available. Click Load Sector Data.")
         st.stop()
 
-    # ── Summary bar chart: RS vs SPY ─────────────────────────────────────────
+    # ── Summary bar chart: RS vs SPY — grouped by category for readability ────
     st.markdown('<div class="panel-head">RELATIVE STRENGTH VS SPY — 1 MONTH</div>',
                 unsafe_allow_html=True)
-    rs_colors = ["#16c784" if r["rs1m"] >= 0 else "#ea3a44" for r in rot]
+    _cats_avail = ["🔥 Top 15", "All"] + [c for c in mod_sector_str.ROTATION_CATEGORIES
+                                          if any(r.get("category") == c for r in rot)]
+    _cat_sel = st.radio("Category", _cats_avail, horizontal=True,
+                        label_visibility="collapsed", key="_rot_cat")
+    if _cat_sel == "🔥 Top 15":
+        _rot_view = rot[:15]   # already sorted by RS 1M desc
+    elif _cat_sel == "All":
+        _rot_view = rot
+    else:
+        _rot_view = [r for r in rot if r.get("category") == _cat_sel]
+
+    rs_colors = ["#16c784" if r["rs1m"] >= 0 else "#ea3a44" for r in _rot_view]
     fig_rs = go.Figure(go.Bar(
-        x=[r["label"] for r in rot],
-        y=[r["rs1m"] for r in rot],
+        x=[r["label"] for r in _rot_view],
+        y=[r["rs1m"] for r in _rot_view],
         marker_color=rs_colors,
-        text=[f"{r['rs1m']:+.1f}%" for r in rot],
+        text=[f"{r['rs1m']:+.1f}%" for r in _rot_view],
         textposition="outside",
-        hovertemplate="%{x}<br>RS 1M: %{y:+.1f}%<extra></extra>",
+        customdata=[[r["etf"], r.get("category", ""), r["momentum_dir"]] for r in _rot_view],
+        hovertemplate="<b>%{x}</b> (%{customdata[0]})<br>"
+                      "RS 1M vs SPY: %{y:+.1f}%<br>"
+                      "Category: %{customdata[1]} · Momentum %{customdata[2]}<extra></extra>",
     ))
     fig_rs.update_layout(
         paper_bgcolor="#131722", plot_bgcolor="#1c2333",
         font_color="#e8edf8", font_family="IBM Plex Mono",
-        height=420, margin=dict(t=20, b=80, l=10, r=10),
+        height=420 if len(_rot_view) > 20 else 360,
+        margin=dict(t=20, b=80, l=10, r=10),
         yaxis=dict(gridcolor="#2a3348", zeroline=True,
                    zerolinecolor="#556070", ticksuffix="%"),
-        xaxis=dict(tickfont=dict(size=9), tickangle=-45),
+        xaxis=dict(tickfont=dict(size=10 if len(_rot_view) <= 20 else 8),
+                   tickangle=-45),
         showlegend=False,
     )
     st.plotly_chart(fig_rs, use_container_width=True)
@@ -4752,6 +4801,9 @@ elif page == "🔄 Sector Rotation":
 # ─── Page: News Feed ──────────────────────────────────────────────────────────
 elif page == "📰 News Feed":
     st.title("📰 Unified News Feed")
+    _page_about("""**What:** all headlines for your tracked symbols in one stream, with sentiment tagging and a monthly momentum chart.
+**How:** headlines fetched per symbol (Finnhub + extra sources), sentiment = keyword scoring (positive/negative word lists — crude but consistent). The chart counts monthly positive/neutral/negative + a Net line (pos − neg) to quantify NARRATIVE momentum.
+**Use:** the Net line trend matters more than any single headline — narrative turning up/down often precedes multiple expansion/compression.""")
     st.caption(
         "Latest news across your watchlist — sorted by date, filtered by sentiment. "
         "Sources: Finnhub, Yahoo Finance, Seeking Alpha, StockTwits."
@@ -5007,6 +5059,9 @@ elif page == "📰 News Feed":
 # ─── Page: AI Screener ────────────────────────────────────────────────────────
 elif page == "🔎 AI Screener":
     st.title("🔎 AI Screener & Portfolio Builder")
+    _page_about("""**What:** describe what you want in plain language — Claude turns it into a screen or a full weighted portfolio.
+**How:** Screen mode parses your criteria into filters and scores live candidates. Build mode designs 4-8 positions with weights, roles and rationale; Agent mode actively fetches live metrics via tools before deciding. Track button hands the result to the 🎯 Tracker.
+**Use:** be specific ('SaaS, >20% growth, P/S<10, above MA200'). Treat output as a research shortlist — validate in Analyze before committing.""")
     if not ANTHROPIC_API_KEY:
         st.error("ANTHROPIC_API_KEY required.")
         st.stop()
@@ -5366,6 +5421,9 @@ elif page == "🎯 Tracker":
     _etp = lambda v: _h_tp.escape(str(v or ""), quote=False)
 
     st.title("🎯 Portfolio Tracker")
+    _page_about("""**What:** the command center for a LIVE portfolio/index you built — drift, triggers, rebalancing, risk.
+**How:** weights drift with prices; triggers fire on drift ≥ threshold, momentum crashes (-12%/1M), momentum leaders (+20%/3M), RSI extremes, insider activity (MSPR), health downgrades, concentration >30%. The rebalance plan only proposes trades that clear the drift threshold AND minimum size, with cost estimated in bps. Risk parity, stress scenarios and Monte Carlo live in the expanders below.
+**Use:** check weekly, not daily. Act when triggers CLUSTER on a position — one trigger is noise, three is a message. The Claude advisor weighs it all including whether rebalancing is worth the cost.""")
     st.caption("Dynamic monitoring of tracked portfolios: drift vs target, momentum, insider "
                "and valuation triggers, cost-aware rebalancing, and a Claude rebalance advisor.")
 
@@ -5791,6 +5849,9 @@ elif page == "🎯 Tracker":
 # ─── Page: Backtester ─────────────────────────────────────────────────────────
 elif page == "📊 Backtester":
     st.title("📊 Strategy Backtester")
+    _page_about("""**What:** test a mechanical strategy on real history before risking money on the idea.
+**How:** signals computed bar-by-bar (no lookahead: yesterday's signal → today's return); equity curve compounds daily returns vs a Buy & Hold benchmark on the same capital. Metrics: CAGR, Sharpe (return per unit of risk), max drawdown, win rate, profit factor.
+**Use:** beating Buy & Hold is the bar — most strategies don't. Beware overfitting: parameters tuned to look great on ONE period usually fail on the next. Test 2-3 different periods.""")
     st.caption("Simulate trading strategies on historical price data. Compare vs. Buy & Hold.")
 
     # ── Controls ──────────────────────────────────────────────────────────────
@@ -5989,6 +6050,9 @@ elif page == "📝 Paper Portfolio":
     _e = lambda v: _h.escape(str(v or ""), quote=False)
 
     st.title("📝 Paper Portfolio")
+    _page_about("""**What:** virtual portfolios ($50K each) for practicing decisions with zero risk — with an AI coach reviewing every move.
+**How:** trades execute at live prices; dividends auto-credit on ex-dates; Claude comments on each trade instantly (Haiku) and grades the whole portfolio on demand (Sonnet): what worked, what didn't, lessons. Multiple portfolios let you A/B different styles (Bull/Bear/Neutral).
+**Use:** the journal is the point — after 20+ trades your patterns (cutting winners early, holding losers) become visible and fixable.""")
     st.caption("AI-managed demo portfolios — track trades, compare strategies, learn from market events.")
 
     # ── Load data ──────────────────────────────────────────────────────────────
