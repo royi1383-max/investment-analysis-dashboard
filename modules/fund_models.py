@@ -321,6 +321,9 @@ def analyze_stock(symbol: str) -> dict:
             "greenblatt": magic_formula(info),
             "canslim":   canslim_check(info, close, regime),
             "bogle":     bogle_test(close),
+            "piotroski": (_pio := piotroski_fscore(symbol)),
+            "altman":    altman_z(symbol),
+            "templeton": templeton_check(info, close, _pio.get("score")),
             "error":     None,
         }
     except Exception as e:
@@ -571,3 +574,161 @@ def bogle_test(close) -> dict:
         return {"rows": out, "verdict": verdict}
     except Exception as e:
         return {"verdict": f"Unavailable: {e}", "rows": {}}
+
+
+# ═══ Academic / quant classics: Piotroski, Altman, Templeton ══════════════════
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def piotroski_fscore(symbol: str) -> dict:
+    """Piotroski F-Score (2000): 9 binary fundamental-strength checks comparing
+    the latest annual statements to the prior year. 8-9 = strong; 0-2 = weak.
+    Academically, high-F cheap stocks beat low-F by ~7.5%/yr."""
+    import yfinance as yf
+    try:
+        tk  = yf.Ticker(symbol)
+        inc = tk.income_stmt
+        bal = tk.balance_sheet
+        cfs = tk.cashflow
+        if inc is None or inc.empty or bal is None or bal.empty:
+            return {"score": None, "checks": [], "verdict": "Financial statements unavailable"}
+
+        def _get(df, names, col):
+            for n in names:
+                if n in df.index:
+                    v = df.loc[n].iloc[col]
+                    if v == v:  # not NaN
+                        return float(v)
+            return None
+
+        ni0  = _get(inc, ["Net Income"], 0);            ni1  = _get(inc, ["Net Income"], 1)
+        ta0  = _get(bal, ["Total Assets"], 0);          ta1  = _get(bal, ["Total Assets"], 1)
+        ocf0 = _get(cfs, ["Operating Cash Flow"], 0)
+        ltd0 = _get(bal, ["Long Term Debt"], 0);        ltd1 = _get(bal, ["Long Term Debt"], 1)
+        ca0  = _get(bal, ["Current Assets"], 0);        ca1  = _get(bal, ["Current Assets"], 1)
+        cl0  = _get(bal, ["Current Liabilities"], 0);   cl1  = _get(bal, ["Current Liabilities"], 1)
+        sh0  = _get(bal, ["Ordinary Shares Number", "Share Issued"], 0)
+        sh1  = _get(bal, ["Ordinary Shares Number", "Share Issued"], 1)
+        gp0  = _get(inc, ["Gross Profit"], 0);          gp1  = _get(inc, ["Gross Profit"], 1)
+        rev0 = _get(inc, ["Total Revenue"], 0);         rev1 = _get(inc, ["Total Revenue"], 1)
+
+        checks = []
+        def add(name, cond):
+            checks.append((name, bool(cond) if cond is not None else False))
+
+        roa0 = ni0 / ta0 if ni0 is not None and ta0 else None
+        roa1 = ni1 / ta1 if ni1 is not None and ta1 else None
+        add("Profitable (ROA > 0)",                roa0 is not None and roa0 > 0)
+        add("Positive operating cash flow",        ocf0 is not None and ocf0 > 0)
+        add("ROA improving vs last year",          roa0 is not None and roa1 is not None and roa0 > roa1)
+        add("OCF > Net Income (low accruals)",     ocf0 is not None and ni0 is not None and ocf0 > ni0)
+        ltr0 = (ltd0 or 0) / ta0 if ta0 else None
+        ltr1 = (ltd1 or 0) / ta1 if ta1 else None
+        add("Leverage falling (LT debt / assets)", ltr0 is not None and ltr1 is not None and ltr0 <= ltr1)
+        cr0 = ca0 / cl0 if ca0 and cl0 else None
+        cr1 = ca1 / cl1 if ca1 and cl1 else None
+        add("Liquidity improving (current ratio)", cr0 is not None and cr1 is not None and cr0 > cr1)
+        add("No dilution (shares not up >2%)",     sh0 is not None and sh1 is not None and sh0 <= sh1 * 1.02)
+        gm0 = gp0 / rev0 if gp0 is not None and rev0 else None
+        gm1 = gp1 / rev1 if gp1 is not None and rev1 else None
+        add("Gross margin improving",              gm0 is not None and gm1 is not None and gm0 > gm1)
+        at0 = rev0 / ta0 if rev0 and ta0 else None
+        at1 = rev1 / ta1 if rev1 and ta1 else None
+        add("Asset turnover improving",            at0 is not None and at1 is not None and at0 > at1)
+
+        score = sum(1 for _, ok in checks if ok)
+        if score >= 8:
+            verdict = f"F-Score {score}/9 — FUNDAMENTALLY STRENGTHENING across the board"
+        elif score >= 5:
+            verdict = f"F-Score {score}/9 — solid, mixed improvement"
+        else:
+            verdict = f"F-Score {score}/9 — fundamentals DETERIORATING; cheap here is often a trap"
+        return {"score": score, "checks": checks, "verdict": verdict}
+    except Exception as e:
+        return {"score": None, "checks": [], "verdict": f"Unavailable: {e}"}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def altman_z(symbol: str) -> dict:
+    """Altman Z-Score (1968): bankruptcy-risk composite.
+    Z = 1.2·WC/TA + 1.4·RE/TA + 3.3·EBIT/TA + 0.6·MC/TL + 1.0·Sales/TA.
+    >2.99 safe · 1.81-2.99 grey zone · <1.81 distress."""
+    import yfinance as yf
+    try:
+        tk  = yf.Ticker(symbol)
+        bal = tk.balance_sheet
+        inc = tk.income_stmt
+        info = get_ticker_info(symbol)
+        if bal is None or bal.empty or inc is None or inc.empty:
+            return {"z": None, "verdict": "Financial statements unavailable"}
+
+        def _g(df, names):
+            for n in names:
+                if n in df.index:
+                    v = df.loc[n].iloc[0]
+                    if v == v:
+                        return float(v)
+            return None
+
+        ta = _g(bal, ["Total Assets"])
+        tl = _g(bal, ["Total Liabilities Net Minority Interest", "Total Liabilities"])
+        wc = _g(bal, ["Working Capital"])
+        if wc is None:
+            ca = _g(bal, ["Current Assets"]); cl = _g(bal, ["Current Liabilities"])
+            wc = (ca - cl) if ca is not None and cl is not None else None
+        re_ = _g(bal, ["Retained Earnings"])
+        ebit = _g(inc, ["EBIT", "Operating Income"])
+        sales = _g(inc, ["Total Revenue"])
+        mc = info.get("marketCap")
+
+        if not ta or not tl or mc is None:
+            return {"z": None, "verdict": "Missing balance-sheet inputs"}
+
+        z = (1.2 * (wc or 0) / ta + 1.4 * (re_ or 0) / ta + 3.3 * (ebit or 0) / ta
+             + 0.6 * mc / tl + 1.0 * (sales or 0) / ta)
+        if z > 2.99:
+            verdict = f"Z = {z:.2f} — SAFE ZONE: negligible bankruptcy risk"
+        elif z >= 1.81:
+            verdict = f"Z = {z:.2f} — GREY ZONE: watch leverage and cash flow"
+        else:
+            verdict = f"Z = {z:.2f} — DISTRESS ZONE: historically elevated default risk"
+        return {"z": round(z, 2), "verdict": verdict}
+    except Exception as e:
+        return {"z": None, "verdict": f"Unavailable: {e}"}
+
+
+def templeton_check(info: dict, close, fscore: int | None) -> dict:
+    """Templeton: 'buy at the point of maximum pessimism' — but only QUALITY
+    under pressure, not garbage. Mechanically: deep drawdown from the 52w high,
+    washed-out momentum, with fundamentals still intact."""
+    price = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+    hi52  = info.get("fiftyTwoWeekHigh")
+    roe   = info.get("returnOnEquity")
+    fcf   = info.get("freeCashflow")
+    if not price or not hi52:
+        return {"verdict": "Insufficient data", "drawdown": None}
+    dd = (price / hi52 - 1) * 100
+    from utils.indicators import rsi_last
+    rsi = rsi_last(close) if close is not None and len(close) > 20 else None
+
+    deep      = dd <= -35
+    washed    = rsi is not None and rsi < 35
+    quality   = (roe or 0) >= 0.10 and (fcf or 0) > 0
+    not_trap  = fscore is not None and fscore >= 5
+
+    if deep and quality and not_trap:
+        verdict = (f"MAXIMUM PESSIMISM CANDIDATE — {abs(dd):.0f}% off the high, "
+                   f"{'RSI washed out, ' if washed else ''}yet quality intact "
+                   f"(F-Score {fscore}). This is where Templeton hunted.")
+        color = "good"
+    elif deep and not quality:
+        verdict = (f"{abs(dd):.0f}% off the high but quality is BROKEN — "
+                   f"pessimism justified, not maximum. A falling knife, not a bargain.")
+        color = "bad"
+    elif dd > -15:
+        verdict = f"Only {abs(dd):.0f}% off the high — no pessimism here to buy."
+        color = "na"
+    else:
+        verdict = (f"{abs(dd):.0f}% off the high — partial pessimism. "
+                   f"Watch for capitulation + stabilizing fundamentals.")
+        color = "warn"
+    return {"drawdown": round(dd, 1), "rsi": rsi, "verdict": verdict, "color": color}

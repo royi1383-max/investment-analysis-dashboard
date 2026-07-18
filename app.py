@@ -51,6 +51,7 @@ import modules.risk_tools       as mod_rt
 import modules.earnings_quality as mod_eq
 import modules.metric_context   as mod_mctx
 import modules.glossary         as mod_gloss
+import modules.market_valuation as mod_mval
 from modules.historical import METRICS_CATALOG
 from config import FINNHUB_API_KEY
 
@@ -2958,7 +2959,8 @@ if page == "🔍 Analyze":
                 _tip_g = {k: _html.escape(mod_gloss.TIP[k], quote=True)
                           for k in ("buffett_method", "munger_method", "lynch_method",
                                     "graham_method", "greenblatt_method", "canslim_method",
-                                    "bogle_method")}
+                                    "bogle_method", "piotroski_method", "altman_method",
+                                    "templeton_method")}
 
                 def _guru_card(title, tip_key, verdict, verdict_color, body_html):
                     return (
@@ -3066,6 +3068,54 @@ if page == "🔍 Analyze":
                         f'🚀 O\'Neil — CANSLIM ({_cs["passed"]}/{_cs["total"]})',
                         "canslim_method", _cs["verdict"], _cs_c,
                         _checks_html(_cs["checks"])), unsafe_allow_html=True)
+
+                # ── Academic quant classics (full width, 2 cols) ─────────────
+                _ac1, _ac2 = st.columns(2)
+                with _ac1:
+                    # Piotroski
+                    _pi = _fm["piotroski"]
+                    if _pi.get("score") is not None:
+                        _pi_c = ("#16c784" if _pi["score"] >= 8 else
+                                 "#f0b90b" if _pi["score"] >= 5 else "#ea3a44")
+                        _pi_body = "".join(
+                            f'<div style="font-size:12px;color:{"#16c784" if ok else "#ea3a44"};'
+                            f'padding:1px 0">{"✓" if ok else "✗"} {_html.escape(lbl)}</div>'
+                            for lbl, ok in _pi["checks"]
+                        )
+                        st.markdown(_guru_card(
+                            f'🎓 Piotroski F-Score ({_pi["score"]}/9)',
+                            "piotroski_method", _pi["verdict"], _pi_c, _pi_body),
+                            unsafe_allow_html=True)
+                    else:
+                        st.info(f"Piotroski: {_pi.get('verdict', 'unavailable')}")
+
+                with _ac2:
+                    # Altman Z
+                    _az = _fm["altman"]
+                    if _az.get("z") is not None:
+                        _az_c = ("#16c784" if _az["z"] > 2.99 else
+                                 "#f0b90b" if _az["z"] >= 1.81 else "#ea3a44")
+                        st.markdown(_guru_card(
+                            f'⚗️ Altman Z-Score ({_az["z"]})',
+                            "altman_method", _az["verdict"], _az_c, ""),
+                            unsafe_allow_html=True)
+                    else:
+                        st.info(f"Altman Z: {_az.get('verdict', 'unavailable')}")
+
+                    # Templeton
+                    _tm = _fm["templeton"]
+                    _tm_c = {"good": "#16c784", "warn": "#f0b90b",
+                             "bad": "#ea3a44", "na": "#8a9bc2"}.get(_tm.get("color"), "#8a9bc2")
+                    _tm_body = ""
+                    if _tm.get("drawdown") is not None:
+                        _tm_body = (f'<div style="font-size:12px;color:#cdd6f4">'
+                                    f'Drawdown from 52w high: <b>{_tm["drawdown"]:+.0f}%</b>'
+                                    + (f' · RSI {_tm["rsi"]:.0f}' if _tm.get("rsi") else '')
+                                    + '</div>')
+                    st.markdown(_guru_card(
+                        "🌍 Templeton — Maximum Pessimism",
+                        "templeton_method", _tm["verdict"], _tm_c, _tm_body),
+                        unsafe_allow_html=True)
 
         # ── Risk & Sizing (trader's risk-first workflow) ─────────────────────
         with tab_risk:
@@ -4634,6 +4684,53 @@ elif page == "🏥 Market Health":
             st.session_state["mhealth_data"] = mod_mhealth.fetch_all()
 
     data = st.session_state.get("mhealth_data", {})
+
+    # ── 🌡 Valuation & Sentiment Gauges (Shiller / Buffett / Fear & Greed) ────
+    st.markdown('<div class="panel-head">🌡 VALUATION &amp; SENTIMENT GAUGES</div>',
+                unsafe_allow_html=True)
+    with st.spinner("Loading valuation gauges..."):
+        _cape = mod_mval.get_shiller_cape()
+        _buff = mod_mval.get_buffett_indicator()
+        _fg   = mod_mval.get_fear_greed()
+
+    _vg1, _vg2, _vg3 = st.columns(3)
+
+    def _gauge_card(title, tip_key, value_s, color, verdict, extra=""):
+        return (
+            f'<div style="background:#161b27;border:1px solid #2a3348;'
+            f'border-left:4px solid {color};border-radius:10px;'
+            f'padding:16px 18px;height:100%;cursor:help" '
+            f'title="{_html.escape(mod_gloss.TIP[tip_key], quote=True)}">'
+            f'<div style="font-size:11px;color:#556070;text-transform:uppercase;'
+            f'letter-spacing:1px;margin-bottom:6px">{title} ⓘ</div>'
+            f'<div style="font-size:26px;font-weight:800;color:{color};'
+            f'font-family:IBM Plex Mono,monospace">{value_s}</div>'
+            f'<div style="font-size:11.5px;color:#cdd6f4;margin-top:6px;'
+            f'line-height:1.5">{_html.escape(verdict)}</div>{extra}</div>'
+        )
+
+    with _vg1:
+        st.markdown(_gauge_card(
+            "Shiller CAPE (S&P 500)", "shiller_method",
+            f"{_cape['cape']:.1f}" if _cape.get("cape") else "N/A",
+            _cape["color"], _cape["verdict"]), unsafe_allow_html=True)
+    with _vg2:
+        st.markdown(_gauge_card(
+            "Buffett Indicator (Mkt Cap / GDP)", "buffett_indicator",
+            f"{_buff['ratio']:.0f}%" if _buff.get("ratio") else "N/A",
+            _buff["color"], _buff["verdict"]), unsafe_allow_html=True)
+    with _vg3:
+        _fg_extra = ""
+        if _fg.get("components"):
+            _fg_extra = ('<div style="font-size:10px;color:#556070;margin-top:6px">' +
+                         " · ".join(f"{k.split(' (')[0]}: {v}"
+                                    for k, v in _fg["components"].items()) + "</div>")
+        st.markdown(_gauge_card(
+            "Fear & Greed (local composite)", "fear_greed",
+            f"{_fg['score']} — {_fg['label']}" if _fg.get("score") is not None else "N/A",
+            _fg["color"], _fg.get("note", ""), _fg_extra), unsafe_allow_html=True)
+
+    st.markdown("---")
 
     # Show FRED key missing callout when any FRED-sourced indicator has no value
     from config import FRED_API_KEY as _fred_key_mh
