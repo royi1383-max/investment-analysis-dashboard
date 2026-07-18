@@ -3653,15 +3653,15 @@ elif page == "💼 Portfolio":
                     else:
                         _pb_c1, _pb_c2, _pb_c3, _pb_c4, _pb_c5 = st.columns(5)
                         _pb_c1.metric("Portfolio Beta", f"{_pb['portfolio_beta']:.2f}",
-                                      help="Sensitivity vs SPY. 1.0 = moves with market.")
+                                      help=mod_gloss.TIP["beta"])
                         _pb_c2.metric("Annual Vol", f"{_pb['annual_vol_pct']:.1f}%",
-                                      help="Annualised portfolio volatility.")
+                                      help=mod_gloss.TIP["volatility"])
                         _pb_c3.metric("Max Drawdown", f"{_pb['max_drawdown_pct']:.1f}%",
-                                      help="Worst peak-to-trough loss past year.")
+                                      help=mod_gloss.TIP["max_drawdown"])
                         _pb_c4.metric("VaR 95% (1d)", f"{_pb['var_95_1d']:.2f}%",
-                                      help="Worst expected 1-day loss 95% of the time.")
+                                      help=mod_gloss.TIP["var"])
                         _pb_c5.metric("Sharpe", f"{_pb['sharpe_approx']:.2f}",
-                                      help="Annualised return ÷ volatility.")
+                                      help=mod_gloss.TIP["sharpe"])
 
                         if _pb.get("risk_flags"):
                             st.markdown('<div class="panel-head" style="margin-top:8px">'
@@ -3792,26 +3792,16 @@ elif page == "💼 Portfolio":
                     st.warning(_pr["error"])
                 else:
                     _pr_c1, _pr_c2, _pr_c3, _pr_c4, _pr_c5 = st.columns(5)
-                    _pr_c1.metric(
-                        "Portfolio Beta", f"{_pr['portfolio_beta']:.2f}",
-                        help="Sensitivity vs SPY. 1.0 = moves with the market.",
-                    )
-                    _pr_c2.metric(
-                        "Annual Vol", f"{_pr['annual_vol_pct']:.1f}%",
-                        help="Annualised portfolio volatility (1Y daily returns).",
-                    )
-                    _pr_c3.metric(
-                        "Max Drawdown", f"{_pr['max_drawdown_pct']:.1f}%",
-                        help="Worst peak-to-trough loss over the past year.",
-                    )
-                    _pr_c4.metric(
-                        "VaR 95% (1d)", f"{_pr['var_95_1d']:.2f}%",
-                        help="Worst expected 1-day loss 95% of the time (historical).",
-                    )
-                    _pr_c5.metric(
-                        "Sharpe (approx)", f"{_pr['sharpe_approx']:.2f}",
-                        help="Annualised return ÷ volatility (0% risk-free rate).",
-                    )
+                    _pr_c1.metric("Portfolio Beta", f"{_pr['portfolio_beta']:.2f}",
+                                  help=mod_gloss.TIP["beta"])
+                    _pr_c2.metric("Annual Vol", f"{_pr['annual_vol_pct']:.1f}%",
+                                  help=mod_gloss.TIP["volatility"])
+                    _pr_c3.metric("Max Drawdown", f"{_pr['max_drawdown_pct']:.1f}%",
+                                  help=mod_gloss.TIP["max_drawdown"])
+                    _pr_c4.metric("VaR 95% (1d)", f"{_pr['var_95_1d']:.2f}%",
+                                  help=mod_gloss.TIP["var"])
+                    _pr_c5.metric("Sharpe (approx)", f"{_pr['sharpe_approx']:.2f}",
+                                  help=mod_gloss.TIP["sharpe"])
 
                     if _pr.get("risk_flags"):
                         st.markdown('<div class="panel-head" style="margin-top:8px">'
@@ -4011,10 +4001,14 @@ elif page == "⭐ Weekly Picks":
     buys        = [r for r in recs if r.get("thesis", {}).get("action") == "BUY"]
 
     s1, s2, s3, s4 = st.columns(4)
-    s1.metric("Scanned",    scanned)
-    s2.metric("Qualified",  len(recs), delta=f"{filtered_out} filtered out")
-    s3.metric("Strong Buy", len(strong_buys))
-    s4.metric("Buy",        len(buys))
+    s1.metric("Scanned",    scanned,
+              help="Stocks evaluated this week: 30 anchor names + 30 rotating from the 223-stock universe. Rotation ensures fresh candidates surface every week.")
+    s2.metric("Qualified",  len(recs), delta=f"{filtered_out} filtered out",
+              help="Passed at least 4 of 6 entry conditions (fundamental, technical, analysts, MA200, momentum, options flow) at thresholds set by the current market regime — stricter in RISK-OFF.")
+    s3.metric("Strong Buy", len(strong_buys),
+              help=mod_gloss.TIP["weekly_score"])
+    s4.metric("Buy",        len(buys),
+              help=mod_gloss.TIP["conviction"])
 
     if not recs:
         thresh = output.get("thresholds", {})
@@ -4618,9 +4612,14 @@ elif page == "🏥 Market Health":
 elif page == "🔄 Sector Rotation":
     st.title("🔄 Sector Rotation Monitor")
     st.caption(
-        "11 SPDR broad sectors + 27 thematic sub-sectors — ranked by 1M Relative Strength vs SPY. "
+        "11 SPDR broad sectors + 45 thematic sub-sectors — ranked by 1M Relative Strength vs SPY. "
         "↑ accelerating · → stable · ↓ decelerating momentum."
     )
+    with st.expander("ⓘ How to read this page", expanded=False):
+        st.markdown(f"- **Relative Strength (RS):** {mod_gloss.TIP['rs']}")
+        st.markdown(f"- **Momentum direction (↑→↓):** {mod_gloss.TIP['momentum_dir']}")
+        st.markdown(f"- **Grade (A-F):** {mod_gloss.TIP['grade']}")
+        st.markdown(f"- **Why rotation matters:** {mod_gloss.TIP['sector_rotation']}")
 
     if st.button("🔄 Load Sector Data", type="primary") or "sector_rot" not in st.session_state:
         with st.spinner("Fetching sector ETF data…"):
@@ -5841,12 +5840,14 @@ elif page == "📊 Backtester":
             _tr    = _bt_res["total_trades"]
             _cagr  = _bt_res["cagr"]
 
-            def _bt_metric(label, value, color="#e8edf8"):
+            def _bt_metric(label, value, color="#e8edf8", tip=""):
+                _tip_attr = f' title="{_html.escape(tip, quote=True)}"' if tip else ""
+                _cursor = "cursor:help;" if tip else ""
                 return (
                     f'<div style="background:#1a2035;border:1px solid #2a3348;border-radius:8px;'
-                    f'padding:12px 16px;text-align:center">'
+                    f'padding:12px 16px;text-align:center;{_cursor}"{_tip_attr}>'
                     f'<div style="font-size:10px;font-family:\'IBM Plex Mono\',monospace;'
-                    f'color:#556070;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">{label}</div>'
+                    f'color:#556070;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">{label}{" ⓘ" if tip else ""}</div>'
                     f'<div style="font-size:20px;font-weight:700;color:{color};'
                     f'font-family:\'IBM Plex Mono\',monospace">{value}</div>'
                     f'</div>'
@@ -5856,21 +5857,23 @@ elif page == "📊 Backtester":
             _metric_cols = [_c1, _c2, _c3, _c4, _c5, _c6]
             _metrics = [
                 ("Total Return",   f"{'+' if _tot>=0 else ''}{_tot*100:.1f}%",
-                 "#16c784" if _tot >= 0 else "#ea3a44"),
+                 "#16c784" if _tot >= 0 else "#ea3a44", mod_gloss.TIP["backtest"]),
                 ("vs Buy & Hold",  f"{'+' if _alpha>=0 else ''}{_alpha*100:.1f}%",
-                 "#16c784" if _alpha >= 0 else "#ea3a44"),
+                 "#16c784" if _alpha >= 0 else "#ea3a44", mod_gloss.TIP["benchmark"]),
                 ("CAGR",           f"{'+' if _cagr>=0 else ''}{_cagr*100:.1f}%",
-                 "#16c784" if _cagr >= 0 else "#ea3a44"),
+                 "#16c784" if _cagr >= 0 else "#ea3a44", mod_gloss.TIP["cagr"]),
                 ("Sharpe Ratio",   f"{_sh:.2f}",
-                 "#16c784" if _sh >= 1 else "#f0b90b" if _sh >= 0.5 else "#ea3a44"),
+                 "#16c784" if _sh >= 1 else "#f0b90b" if _sh >= 0.5 else "#ea3a44",
+                 mod_gloss.TIP["sharpe"]),
                 ("Max Drawdown",   f"{_dd*100:.1f}%",
-                 "#ea3a44" if _dd < -0.2 else "#f0b90b" if _dd < -0.1 else "#16c784"),
+                 "#ea3a44" if _dd < -0.2 else "#f0b90b" if _dd < -0.1 else "#16c784",
+                 mod_gloss.TIP["max_drawdown"]),
                 ("Win Rate",       f"{_wr*100:.0f}% ({_tr}T)",
-                 "#16c784" if _wr >= 0.5 else "#f0b90b"),
+                 "#16c784" if _wr >= 0.5 else "#f0b90b", mod_gloss.TIP["win_rate"]),
             ]
-            for col, (lbl, val, clr) in zip(_metric_cols, _metrics):
+            for col, (lbl, val, clr, _tip_m) in zip(_metric_cols, _metrics):
                 with col:
-                    st.markdown(_bt_metric(lbl, val, clr), unsafe_allow_html=True)
+                    st.markdown(_bt_metric(lbl, val, clr, _tip_m), unsafe_allow_html=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -6084,11 +6087,15 @@ elif page == "📝 Paper Portfolio":
 
     _pnl_color = "#16c784" if _val["pnl_usd"] >= 0 else "#ea3a44"
     _hc1, _hc2, _hc3, _hc4, _hc5 = st.columns(5)
-    _hc1.metric("Total Value",     f"${_val['total']:,.0f}")
-    _hc2.metric("Cash",            f"${_val['cash']:,.0f}")
+    _hc1.metric("Total Value",     f"${_val['total']:,.0f}",
+                help="Cash + market value of all holdings at live prices.")
+    _hc2.metric("Cash",            f"${_val['cash']:,.0f}",
+                help="Uninvested capital. Cash is a position too — it's dry powder for pullbacks and a drag in rallies.")
     _hc3.metric("Holdings Value",  f"${_val['holdings_value']:,.0f}")
-    _hc4.metric("Total P&L $",     f"${_val['pnl_usd']:+,.0f}")
-    _hc5.metric("Total P&L %",     f"{_val['pnl_pct']:+.2f}%")
+    _hc4.metric("Total P&L $",     f"${_val['pnl_usd']:+,.0f}",
+                help="Unrealized + realized profit vs initial capital, including collected dividends.")
+    _hc5.metric("Total P&L %",     f"{_val['pnl_pct']:+.2f}%",
+                help=mod_gloss.TIP["alpha"])
 
     # ── Mini equity curve ──────────────────────────────────────────────────────
     _eq_curve = mod_pp.get_equity_curve(_pp)
@@ -6377,13 +6384,19 @@ elif page == "📝 Paper Portfolio":
         _stats = mod_pp.get_performance_stats(_pp)
         _total_div = mod_pp.total_dividends(_pp)
         _pc1, _pc2, _pc3, _pc4, _pc5, _pc6, _pc7 = st.columns(7)
-        _pc1.metric("Win Rate",     f"{_stats['win_rate']:.0f}%")
-        _pc2.metric("Avg Win",      f"{_stats['avg_win']:+.1f}%")
-        _pc3.metric("Avg Loss",     f"{_stats['avg_loss']:+.1f}%")
+        _pc1.metric("Win Rate",     f"{_stats['win_rate']:.0f}%",
+                    help=mod_gloss.TIP["win_rate"])
+        _pc2.metric("Avg Win",      f"{_stats['avg_win']:+.1f}%",
+                    help=mod_gloss.TIP["expectancy"])
+        _pc3.metric("Avg Loss",     f"{_stats['avg_loss']:+.1f}%",
+                    help="Average % loss on losing trades. Keep it smaller than your average win — cut losers fast, let winners run.")
         _pc4.metric("Best Trade",   f"{_stats['best_trade']:+.1f}%")
-        _pc5.metric("Worst Trade",  f"{_stats['worst_trade']:+.1f}%")
-        _pc6.metric("Realized P&L", f"${_stats['total_realized']:+,.0f}")
-        _pc7.metric("💰 Dividends", f"${_total_div:,.2f}")
+        _pc5.metric("Worst Trade",  f"{_stats['worst_trade']:+.1f}%",
+                    help="Your worst realized loss. If it dwarfs the average, the stop discipline failed once — one blowup can erase many good trades.")
+        _pc6.metric("Realized P&L", f"${_stats['total_realized']:+,.0f}",
+                    help="Profit locked in from CLOSED positions only. Paper gains can vanish; realized gains can't.")
+        _pc7.metric("💰 Dividends", f"${_total_div:,.2f}",
+                    help="Cash dividends credited automatically for ex-dates passed while holding. Reinvested dividends are a quiet compounding engine.")
 
         if not _eq_curve.empty and len(_eq_curve) >= 2:
             _fig_perf = go.Figure()

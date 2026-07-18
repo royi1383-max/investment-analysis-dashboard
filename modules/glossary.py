@@ -88,6 +88,25 @@ TIP: dict[str, str] = {
     "expectancy": "Expectancy: average $ made per trade over many trades = (win% × avg win) − (loss% × avg loss). Positive expectancy + position sizing = a system; anything else is gambling.",
     "conviction": "Conviction (1-10): how strongly the analysis supports acting. High conviction = bigger (but still capped) size. Low conviction + action = gambling.",
     "time_horizon": "Time Horizon: when the thesis should play out. Mismatched horizon is a classic error — buying a 2-year story and panic-selling at a 2-week dip.",
+
+    # ── Backtesting / performance ────────────────────────────────────────────
+    "cagr": "CAGR: the smoothed annual growth rate — what constant yearly return would produce the same end result. Lets you compare periods of different lengths fairly.",
+    "win_rate": "Win Rate: % of trades that made money. Meaningless alone — a 30% win rate with big winners beats a 70% win rate with big losers. Always pair with payoff ratio.",
+    "profit_factor": "Profit Factor: gross profits ÷ gross losses. Above 1.5 = solid system; below 1 = losing system. More honest than win rate.",
+    "equity_curve": "Equity Curve: your account value over time. The SHAPE matters — a smooth rise beats a jagged one with the same endpoint; deep valleys are drawdowns you'd have had to sit through.",
+    "benchmark": "Benchmark (vs Buy & Hold / SPY): a strategy is only good if it beats just… holding. Many backtests win in trends and lose the moment you include sideways markets.",
+    "backtest": "Backtest: running a strategy on past data. Beware: the past is one sample — overfit parameters look brilliant historically and fail live. Test on different periods.",
+
+    # ── Scanning / scoring ───────────────────────────────────────────────────
+    "rvol": "Relative Volume: today's volume vs the 20-day average. Above 1.5x = unusual interest (institutions moving); breakouts on high RVOL are far more reliable than quiet ones.",
+    "rs": "Relative Strength vs SPY: the stock/sector return minus the index's over the same window. Positive = leadership; institutions hide in the names that fall least and rally most.",
+    "momentum_dir": "Momentum Direction (↑→↓): whether 1-month relative strength is accelerating or fading vs the 3-month baseline. ↑ = money rotating IN now; ↓ = leadership fading.",
+    "weekly_score": "Weekly Score: composite of 5 pillars — model (fundamentals+technicals), analysts, options flow, breakout setup, momentum bonus. Built to surface stocks in BUYABLE condition now, not just good companies.",
+    "bull_pct": "Bull %: share of analysts rating Buy/Strong Buy. Above 70% = strong consensus (but crowded); below 50% = controversial — check who's right.",
+    "breakout_score": "Breakout Setup score: BB squeeze + proximity to 52-week high + tight range + volume surge. High = coiled spring; the move often follows the squeeze.",
+    "composite_health": "Market Health Composite: weighted blend of VIX, yield curve, rates, CPI, credit spreads, trend. Above 70 = risk-on conditions; below 40 = defense first.",
+    "sector_rotation": "Sector Rotation: money constantly moves between sectors as the cycle turns. Riding the sectors gaining relative strength (and avoiding the losers) is a return source independent of stock picking.",
+    "grade": "Grade (A-F): letter summary of a sector's trend + relative strength + momentum acceleration. A/B = leadership; D/F = avoid or watch for reversal setups only.",
 }
 
 

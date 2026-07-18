@@ -297,11 +297,30 @@ _ROTATION_SECTORS: list[tuple[str, str]] = [
     # ── Consumer & Macro ──────────────────────────────────────────────────────
     ("E-Commerce",             "ONLN"),
     ("Airlines & Travel",      "JETS"),
+    # ── Frontier Tech ─────────────────────────────────────────────────────────
+    ("Space",                  "ARKX"),
+    ("Quantum Computing",      "QTUM"),
+    ("Innovation (ARK)",       "ARKK"),
+    # ── Housing, Transport & Consumer ────────────────────────────────────────
+    ("Homebuilders",           "ITB"),
+    ("Retail",                 "XRT"),
+    ("Transportation",         "IYT"),
+    # ── Commodities & Resources ───────────────────────────────────────────────
+    ("Oil Services",           "OIH"),
+    ("Copper Miners",          "COPX"),
+    ("Agriculture",            "MOO"),
+    ("Water",                  "PHO"),
     # ── Global & Commodities ──────────────────────────────────────────────────
     ("Gold Miners",            "GDX"),
     ("China Tech",             "KWEB"),
     ("India",                  "INDA"),
+    ("Japan",                  "EWJ"),
+    ("Europe",                 "VGK"),
+    ("Emerging Markets",       "EEM"),
+    ("Israel",                 "EIS"),
+    # ── Styles ────────────────────────────────────────────────────────────────
     ("Small Cap Growth",       "IWO"),
+    ("Dividend Growth",        "VIG"),
 ]
 
 
