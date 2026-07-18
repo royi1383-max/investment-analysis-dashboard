@@ -54,6 +54,7 @@ import modules.glossary         as mod_gloss
 import modules.market_valuation as mod_mval
 import modules.score_history    as mod_shist
 import modules.briefing         as mod_brief
+import modules.opportunity      as mod_opp
 from modules.historical import METRICS_CATALOG
 from config import FINNHUB_API_KEY
 
@@ -1050,6 +1051,43 @@ if page == "🔍 Analyze":
 
         # ── Overview ─────────────────────────────────────────────────────────
         with tab_ov:
+            # ── 🎯 Opportunity Lens — quality vs condition, opportunity vs trap ──
+            _opp = mod_opp.analyze(symbol)
+            if not _opp.get("error"):
+                _opp_c = _opp["color"]
+                _dd_s = (f' · {_opp["drawdown"]:+.0f}% from 52w high'
+                         if _opp.get("drawdown") is not None else "")
+                _sig_html = "".join(
+                    f'<span style="font-size:11px;color:{"#16c784" if ok else "#556070"};'
+                    f'margin-right:10px;cursor:help" title="{_html.escape(det, quote=True)}">'
+                    f'{"●" if ok else "○"} {_html.escape(lbl)}</span>'
+                    for lbl, ok, det in _opp["signals"]
+                )
+                _q_tip = _html.escape(
+                    "Quality axis (momentum-free): " +
+                    "; ".join(f"{l}: {d}" for l, _, _, d in _opp["quality_parts"]),
+                    quote=True)
+                st.markdown(
+                    f'<div style="background:#161b27;border:2px solid {_opp_c};border-radius:12px;'
+                    f'padding:16px 20px;margin-bottom:14px">'
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                    f'flex-wrap:wrap;gap:8px">'
+                    f'<span style="font-family:IBM Plex Mono,monospace;font-size:18px;'
+                    f'font-weight:800;color:{_opp_c}">🎯 {_html.escape(_opp["quadrant"])}</span>'
+                    f'<span style="font-size:12px;color:#8a9bc2;cursor:help" title="{_q_tip}">'
+                    f'Quality <b style="color:#e8edf8">{_opp["quality"]}/10</b> ⓘ · '
+                    f'Condition <b style="color:#e8edf8">{_opp["condition"]}/10</b>{_dd_s}</span>'
+                    f'</div>'
+                    f'<div style="font-size:12.5px;color:#cdd6f4;margin-top:8px;line-height:1.6">'
+                    f'{_html.escape(_opp["guidance"])}</div>'
+                    f'<div style="margin-top:10px;padding-top:8px;border-top:1px solid #1e2535">'
+                    f'<span style="font-size:10px;color:#556070;text-transform:uppercase;'
+                    f'letter-spacing:1px;margin-right:10px">Reversal readiness '
+                    f'{_opp["readiness"]}/5</span>{_sig_html}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
             col_radar, col_kpi = st.columns([1, 1.3])
             with col_radar:
                 st.markdown('<div class="panel-head">SCORE RADAR</div>', unsafe_allow_html=True)
