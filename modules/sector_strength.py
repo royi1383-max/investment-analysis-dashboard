@@ -258,7 +258,8 @@ def get_sector_context(symbol: str) -> dict:
 ROTATION_CATEGORIES = [
     "Broad Sectors", "AI & Compute", "Tech Themes", "Healthcare",
     "Finance & Crypto", "Energy & Power", "Industry & Defense",
-    "Consumer & Housing", "Commodities", "Geographies", "Styles",
+    "Consumer & Housing", "Commodities", "Rates & Credit",
+    "Geographies", "Styles & Factors",
 ]
 
 _ROTATION_SECTORS: list[tuple[str, str, str]] = [
@@ -295,6 +296,7 @@ _ROTATION_SECTORS: list[tuple[str, str, str]] = [
     ("MedTech Devices",        "IHI",  "Healthcare"),
     ("Genomics",               "ARKG", "Healthcare"),
     ("Pharma (GLP-1 names)",   "XPH",  "Healthcare"),
+    ("Obesity / GLP-1",        "OZEM", "Healthcare"),
     # ── Finance & Crypto ──────────────────────────────────────────────────────
     ("Fintech",                "FINX", "Finance & Crypto"),
     ("Digital Payments",       "IPAY", "Finance & Crypto"),
@@ -312,6 +314,8 @@ _ROTATION_SECTORS: list[tuple[str, str, str]] = [
     ("Infrastructure",         "PAVE", "Industry & Defense"),
     ("Lithium & EV Battery",   "LIT",  "Industry & Defense"),
     ("Transportation",         "IYT",  "Industry & Defense"),
+    ("EU Defense (NATO trade)","EUAD", "Industry & Defense"),
+    ("Global Shipping",        "BOAT", "Industry & Defense"),
     # ── Consumer & Housing ────────────────────────────────────────────────────
     ("E-Commerce",             "ONLN", "Consumer & Housing"),
     ("Airlines & Travel",      "JETS", "Consumer & Housing"),
@@ -324,6 +328,9 @@ _ROTATION_SECTORS: list[tuple[str, str, str]] = [
     ("Rare Earths",            "REMX", "Commodities"),
     ("Agriculture",            "MOO",  "Commodities"),
     ("Water",                  "PHO",  "Commodities"),
+    # ── Rates & Credit (regime reads) ─────────────────────────────────────────
+    ("Long Treasuries (20y+)", "TLT",  "Rates & Credit"),
+    ("High-Yield Credit",      "HYG",  "Rates & Credit"),
     # ── Geographies ───────────────────────────────────────────────────────────
     ("China Tech",             "KWEB", "Geographies"),
     ("India",                  "INDA", "Geographies"),
@@ -339,9 +346,22 @@ _ROTATION_SECTORS: list[tuple[str, str, str]] = [
     ("Saudi Arabia",           "KSA",  "Geographies"),
     ("Israel",                 "EIS",  "Geographies"),
     ("Emerging Markets",       "EEM",  "Geographies"),
+    ("Germany",                "EWG",  "Geographies"),
+    ("United Kingdom",         "EWU",  "Geographies"),
+    ("Poland",                 "EPOL", "Geographies"),
+    ("Indonesia",              "EIDO", "Geographies"),
+    ("Turkey",                 "TUR",  "Geographies"),
+    ("Australia",              "EWA",  "Geographies"),
+    ("Canada",                 "EWC",  "Geographies"),
     # ── Styles ────────────────────────────────────────────────────────────────
-    ("Small Cap Growth",       "IWO",  "Styles"),
-    ("Dividend Growth",        "VIG",  "Styles"),
+    ("Small Cap Growth",       "IWO",  "Styles & Factors"),
+    ("Dividend Growth",        "VIG",  "Styles & Factors"),
+    ("Magnificent 7",          "MAGS", "Styles & Factors"),
+    ("S&P Equal Weight (Breadth)", "RSP", "Styles & Factors"),
+    ("Momentum Factor",        "MTUM", "Styles & Factors"),
+    ("Quality Factor",         "QUAL", "Styles & Factors"),
+    ("Low Volatility",         "USMV", "Styles & Factors"),
+    ("Value Factor",           "VTV",  "Styles & Factors"),
 ]
 
 

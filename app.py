@@ -2950,6 +2950,123 @@ if page == "🔍 Analyze":
                     for _sf in _fac["style_fits"]:
                         st.markdown(f"- {_sf}")
 
+                # ── 🎓 Guru Checklists (full-width, below the two columns) ───
+                st.markdown("---")
+                st.subheader("🎓 Guru Checklists — the legends, mechanically applied")
+                st.caption("Hover any card title for who invented the method, how it's computed, "
+                           "and what the verdict means.")
+                _tip_g = {k: _html.escape(mod_gloss.TIP[k], quote=True)
+                          for k in ("buffett_method", "munger_method", "lynch_method",
+                                    "graham_method", "greenblatt_method", "canslim_method",
+                                    "bogle_method")}
+
+                def _guru_card(title, tip_key, verdict, verdict_color, body_html):
+                    return (
+                        f'<div style="background:#161b27;border:1px solid #2a3348;'
+                        f'border-left:4px solid {verdict_color};border-radius:8px;'
+                        f'padding:14px 18px;margin-bottom:10px;cursor:help" '
+                        f'title="{_tip_g[tip_key]}">'
+                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:2px">{title} ⓘ</div>'
+                        f'<div style="font-size:12px;color:{verdict_color};font-weight:600;'
+                        f'margin-bottom:8px">{_html.escape(verdict)}</div>'
+                        f'{body_html}</div>'
+                    )
+
+                def _checks_html(checks):
+                    return "".join(
+                        f'<div style="font-size:12px;color:{"#16c784" if ok else "#ea3a44"};'
+                        f'padding:1px 0">{"✓" if ok else "✗"} {_html.escape(lbl)} '
+                        f'<span style="color:#556070">({_html.escape(str(val))})</span></div>'
+                        for lbl, ok, val in checks
+                    )
+
+                _gc1, _gc2 = st.columns(2)
+                with _gc1:
+                    # Buffett
+                    _bf = _fm["buffett"]
+                    _bf_c = ("#16c784" if _bf["passed"] == 5 else
+                             "#f0b90b" if _bf["passed"] >= 3 else "#ea3a44")
+                    st.markdown(_guru_card(
+                        f'🏛 Buffett — Wonderful at Fair Price ({_bf["passed"]}/{_bf["total"]})',
+                        "buffett_method", _bf["verdict"], _bf_c,
+                        _checks_html(_bf["checks"])), unsafe_allow_html=True)
+
+                    # Lynch
+                    _ly = _fm["lynch"]
+                    _ly_c = ("#16c784" if _ly.get("peg") and _ly["peg"] < 1 else
+                             "#f0b90b" if _ly.get("peg") and _ly["peg"] <= 2 else "#8a9bc2")
+                    _ly_body = (
+                        f'<div style="font-size:12px;color:#cdd6f4">Category: '
+                        f'<b>{_html.escape(_ly["category"])}</b> '
+                        f'(growth {_ly["growth_pct"]:+.0f}%)</div>'
+                        f'<div style="font-size:11px;color:#8a9bc2;margin:4px 0">'
+                        f'{_html.escape(_ly["cat_note"])}</div>'
+                        f'<div style="font-size:12px;color:#cdd6f4">{_html.escape(_ly["peg_verdict"])}</div>'
+                    )
+                    st.markdown(_guru_card("📗 Lynch — Know What You Own",
+                                           "lynch_method", _ly["category"], _ly_c, _ly_body),
+                                unsafe_allow_html=True)
+
+                    # Graham
+                    _gr = _fm["graham"]
+                    _gr_c = ("#16c784" if (_gr.get("margin") or -1) >= 30 else
+                             "#f0b90b" if (_gr.get("margin") or -1) >= 0 else "#8a9bc2")
+                    _gr_body = ""
+                    if _gr.get("graham_number"):
+                        _gr_body = (f'<div style="font-size:12px;color:#cdd6f4">'
+                                    f'Graham Number: <b>${_gr["graham_number"]:,.2f}</b> · '
+                                    f'margin of safety {_gr["margin"]:+.0f}%</div>')
+                    st.markdown(_guru_card("📜 Graham — Margin of Safety",
+                                           "graham_method", _gr["verdict"], _gr_c, _gr_body),
+                                unsafe_allow_html=True)
+
+                    # Bogle
+                    _bg = _fm["bogle"]
+                    _bg_rows = "".join(
+                        f'<div style="font-size:12px;color:#cdd6f4">{lbl}: stock '
+                        f'<b style="color:{"#16c784" if v["beat"] else "#ea3a44"}">'
+                        f'{v["stock"]:+.1f}%</b> vs SPY {v["spy"]:+.1f}%</div>'
+                        for lbl, v in _bg.get("rows", {}).items()
+                    )
+                    _bg_c = "#16c784" if "every window" in _bg["verdict"] and "Beat" in _bg["verdict"] else "#f0b90b"
+                    st.markdown(_guru_card("🗿 Bogle — Did You Even Beat the Index?",
+                                           "bogle_method", _bg["verdict"], _bg_c, _bg_rows),
+                                unsafe_allow_html=True)
+
+                with _gc2:
+                    # Munger
+                    _mg_f = _fm["munger"]
+                    _mg_c = "#16c784" if not _mg_f["flags"] else "#ea3a44"
+                    _mg_body = "".join(
+                        f'<div style="font-size:12px;color:#ea3a44;padding:1px 0">✗ {_html.escape(f)}</div>'
+                        for f in _mg_f["flags"]
+                    ) or '<div style="font-size:12px;color:#16c784">✓ No disqualifiers found</div>'
+                    st.markdown(_guru_card("🧠 Munger — Inversion Filter",
+                                           "munger_method", _mg_f["verdict"], _mg_c, _mg_body),
+                                unsafe_allow_html=True)
+
+                    # Greenblatt
+                    _gb = _fm["greenblatt"]
+                    _gb_c = ("#16c784" if "CANDIDATE" in _gb["verdict"] else
+                             "#f0b90b" if "GOOD BUSINESS" in _gb["verdict"] else "#8a9bc2")
+                    _gb_body = ""
+                    if _gb.get("ey") is not None:
+                        _gb_body = (f'<div style="font-size:12px;color:#cdd6f4">'
+                                    f'Earnings yield (EBITDA/EV): <b>{_gb["ey"]:.1f}%</b> · '
+                                    f'Return on capital: <b>{_gb["roc"]:.1f}%</b></div>')
+                    st.markdown(_guru_card("✨ Greenblatt — Magic Formula",
+                                           "greenblatt_method", _gb["verdict"], _gb_c, _gb_body),
+                                unsafe_allow_html=True)
+
+                    # CANSLIM
+                    _cs = _fm["canslim"]
+                    _cs_c = ("#16c784" if _cs["passed"] >= 6 else
+                             "#f0b90b" if _cs["passed"] >= 4 else "#ea3a44")
+                    st.markdown(_guru_card(
+                        f'🚀 O\'Neil — CANSLIM ({_cs["passed"]}/{_cs["total"]})',
+                        "canslim_method", _cs["verdict"], _cs_c,
+                        _checks_html(_cs["checks"])), unsafe_allow_html=True)
+
         # ── Risk & Sizing (trader's risk-first workflow) ─────────────────────
         with tab_risk:
             st.subheader(f"🛡 Risk & Sizing — {symbol}")
