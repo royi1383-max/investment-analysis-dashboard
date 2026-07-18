@@ -36,6 +36,54 @@ def strip_json_markdown(raw: str) -> str:
     return raw
 
 
+def salvage_json_objects(raw: str, array_key: str) -> list[dict]:
+    """
+    Rescue parser for TRUNCATED Claude JSON: extracts every COMPLETE object
+    from the `array_key` array, dropping only the object that got cut off
+    at the max_tokens limit.
+
+    Walks the text with brace-depth + string awareness (handles quotes and
+    escapes inside values). Returns [] if the array isn't found.
+    """
+    import json as _json
+    idx = raw.find(f'"{array_key}"')
+    if idx == -1:
+        return []
+    arr_start = raw.find("[", idx)
+    if arr_start == -1:
+        return []
+
+    objects, depth, obj_start = [], 0, None
+    in_str, esc = False, False
+    for i in range(arr_start + 1, len(raw)):
+        ch = raw[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                try:
+                    objects.append(_json.loads(raw[obj_start:i + 1]))
+                except Exception:
+                    pass
+                obj_start = None
+        elif ch == "]" and depth == 0:
+            break
+    return objects
+
+
 def extract_json(raw: str) -> str:
     """Strip fences AND any leading/trailing prose around the JSON payload.
     Works for both objects {...} and arrays [...]."""

@@ -3977,6 +3977,8 @@ elif page == "⭐ Weekly Picks":
     if output.get("thesis_error"):
         st.error(f"⚠ Claude buy-thesis generation failed: {output['thesis_error']} — "
                  f"picks are shown without AI theses. Re-run the scan to retry.")
+    elif output.get("thesis_warning"):
+        st.warning(f"⚠ {output['thesis_warning']}")
 
     # ── Market Regime banner (native Streamlit) ───────────────────────────────
     rc = regime["regime_color"]

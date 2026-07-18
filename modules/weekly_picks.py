@@ -463,15 +463,26 @@ Respond ONLY with valid JSON (no markdown fences):
 }}"""
 
     try:
-        from utils.claude_client import extract_json
+        from utils.claude_client import extract_json, salvage_json_objects
         msg = _get_client().messages.create(
             model="claude-sonnet-5",
-            max_tokens=8000,   # ~22 stocks × large nested JSON — overshoot to avoid truncation
+            max_tokens=16000,  # 22 stocks × large nested JSON — 8000 proved too small
             thinking={"type": "disabled"},
             messages=[{"role": "user", "content": prompt}],
         )
         raw = extract_json(msg.content[0].text)
-        return {t["symbol"]: t for t in json.loads(raw).get("theses", [])}
+        try:
+            return {t["symbol"]: t for t in json.loads(raw).get("theses", [])}
+        except json.JSONDecodeError:
+            # Output hit max_tokens mid-JSON — salvage every COMPLETE thesis
+            # and lose only the one that was cut off.
+            salvaged = salvage_json_objects(raw, "theses")
+            if salvaged:
+                out = {t["symbol"]: t for t in salvaged if "symbol" in t}
+                out["_warning"] = (f"Response was truncated — recovered "
+                                   f"{len(out)} theses; the last one was lost.")
+                return out
+            raise
     except Exception as e:
         # Surface the failure — UI shows it instead of silently dropping all theses
         return {"_error": str(e)}
@@ -589,9 +600,11 @@ def run_recommendations(progress_cb=None) -> dict:
         progress_cb(0.92, f"Claude generating buy theses for {len(qualified)} stocks…")
 
     thesis_error = None
+    thesis_warning = None
     if ANTHROPIC_API_KEY and qualified:
         theses = claude_buy_thesis(qualified, regime)
         thesis_error = theses.get("_error")
+        thesis_warning = theses.get("_warning")
         for r in qualified:
             r["thesis"] = theses.get(r["symbol"], {})
     else:
@@ -635,4 +648,5 @@ def run_recommendations(progress_cb=None) -> dict:
         "week_num":        current_week,
         "pick_history":    new_history,
         "thesis_error":    thesis_error,
+        "thesis_warning":  thesis_warning,
     }
