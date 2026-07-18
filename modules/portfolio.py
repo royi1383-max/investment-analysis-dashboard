@@ -200,6 +200,7 @@ def enrich_portfolio(df: pd.DataFrame, run_scores: bool = False) -> pd.DataFrame
         sym   = row["Ticker"]
         info  = get_ticker_info(sym)
         pdf   = get_price_history(sym, period="5d")
+        price_stale = pdf.empty
         cur_p = float(pdf["Close"].squeeze().iloc[-1]) if not pdf.empty else row["Avg Price"]
 
         cost  = row["Shares"] * row["Avg Price"]
@@ -213,6 +214,7 @@ def enrich_portfolio(df: pd.DataFrame, run_scores: bool = False) -> pd.DataFrame
             "Current Price": cur_p, "Market Value": val,
             "P&L ($)": pnl, "P&L (%)": pnl_p,
             "Sector": info.get("sector", "ETF/Other"),
+            "Price Stale": price_stale,
         }
         if run_scores:
             try:
@@ -258,9 +260,11 @@ def portfolio_summary(df: pd.DataFrame) -> dict:
     total_value = df["Market Value"].sum()
     total_pnl   = df["P&L ($)"].sum()
     pnl_pct     = total_pnl / total_cost if total_cost else 0
-    df["Weight"] = df["Market Value"] / total_value
+    df = df.copy()
+    df["Weight"] = df["Market Value"] / total_value if total_value else 0
     sector_exp = (
-        df.groupby("Sector")["Market Value"].sum() / total_value * 100
+        (df.groupby("Sector")["Market Value"].sum() / total_value * 100)
+        if total_value else df.groupby("Sector")["Market Value"].sum() * 0
     ).sort_values(ascending=False)
     return {
         "total_cost": total_cost, "total_value": total_value,

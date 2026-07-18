@@ -43,6 +43,14 @@ import modules.seasonality      as mod_seasonal
 import modules.sec_13f          as mod_13f
 import modules.backtester       as mod_bt
 import modules.paper_portfolio  as mod_pp
+import modules.tracked_portfolio as mod_tp
+import modules.dcf              as mod_dcf
+import modules.fund_models      as mod_fm
+import modules.excel_export     as mod_xlsx
+import modules.risk_tools       as mod_rt
+import modules.earnings_quality as mod_eq
+import modules.metric_context   as mod_mctx
+import modules.glossary         as mod_gloss
 from modules.historical import METRICS_CATALOG
 from config import FINNHUB_API_KEY
 
@@ -51,37 +59,19 @@ _WP_CACHE = Path(__file__).parent / ".wp_cache.json"
 _WP_MAX_AGE_HOURS = 12   # results expire after 12 hours
 
 
-class _NumpyEncoder(json.JSONEncoder):
-    """Converts numpy scalars → Python natives so they round-trip correctly."""
-    def default(self, obj):
-        try:
-            import numpy as np
-            if isinstance(obj, np.integer):  return int(obj)
-            if isinstance(obj, np.floating): return float(obj)
-            if isinstance(obj, np.bool_):    return bool(obj)
-            if isinstance(obj, np.ndarray):  return obj.tolist()
-        except ImportError:
-            pass
-        return super().default(obj)
+from utils.persist import load_json as _load_json, save_json as _save_json, NumpyEncoder as _NumpyEncoder
 
 
 def _wp_save(output: dict) -> None:
-    payload = {"ts": datetime.now().isoformat(), "data": output}
-    try:
-        _WP_CACHE.write_text(
-            json.dumps(payload, ensure_ascii=False, cls=_NumpyEncoder),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
+    _save_json(_WP_CACHE, {"ts": datetime.now().isoformat(), "data": output}, indent=None)
 
 
 def _wp_load() -> dict | None:
     """Load cached results if they exist and are fresh."""
     try:
-        if not _WP_CACHE.exists():
+        payload = _load_json(_WP_CACHE)
+        if not payload:
             return None
-        payload = json.loads(_WP_CACHE.read_text(encoding="utf-8"))
         ts  = datetime.fromisoformat(payload["ts"])
         age = (datetime.now() - ts).total_seconds() / 3600
         if age > _WP_MAX_AGE_HOURS:
@@ -306,7 +296,7 @@ _TIP = {
     "Debt/Equity":     "Total Debt ÷ Equity. <0.3 = clean balance sheet. 0.3–1 = moderate leverage. >2 = high leverage = risky in rising rate environment",
     # ── Technical ─────────────────────────────────────────────────────────────
     "Trend (MA)":      "Price vs 50-day and 200-day moving averages. Above both = uptrend. Below both = downtrend. Golden Cross (MA50 crosses above MA200) = strong buy signal",
-    "RSI":             "Relative Strength Index. <30 = oversold (potential buy). 30–50 = good entry zone. 50–70 = positive momentum. >70 = overbought, caution",
+    "RSI":             "Relative Strength Index — momentum speedometer. The textbook 30/70 bands are NOT universal: in a strong uptrend RSI 60-80 is the NORMAL zone (momentum, not a top), while in a downtrend RSI 60 is already a stretched bear rally. Judge RSI against the stock's own trend regime — see 'RSI in Context' in the Technical tab.",
     "MACD":            "Momentum indicator: difference between 12 and 26-day EMA. MACD above signal line = rising momentum (bullish). Below = bearish",
     "Volume":          "Current trading volume vs 20-day average. >1.5x = unusual demand — institutions entering. <0.7x = drying up, wait for breakout",
     "52W Position":    "Where price sits within its 52-week range. Near 100% (high) = strong trend. Near 0% (low) = check if opportunity or falling knife",
@@ -662,22 +652,40 @@ with st.sidebar:
          "🏥 Market Health", "🔄 Sector Rotation", "📰 News Feed",
          "🔎 AI Screener", "🌍 Market Radar",
          "💼 Portfolio", "👁 Watchlist",
-         "📝 Paper Portfolio",
+         "📝 Paper Portfolio", "🎯 Tracker",
          "📊 Backtester"],
         key="_nav_page",
         label_visibility="collapsed",
     )
 
     # ── Active alert notifications in sidebar ──────────────────────────────
+    # Throttled: full network check at most once per 5 min per session,
+    # so page navigation isn't gated on per-alert price fetches.
     st.markdown("---")
-    _triggered = mod_alerts.check_alerts()
-    if _triggered:
-        for _al in _triggered:
+    _now_ts = datetime.now().timestamp()
+    _last_check = st.session_state.get("_alerts_last_check", 0)
+    if _now_ts - _last_check > 300:
+        _triggered = mod_alerts.check_alerts()
+        st.session_state["_alerts_last_check"] = _now_ts
+        if _triggered:
+            st.session_state["_alerts_triggered_recent"] = _triggered
+        # Automatic earnings-soon check for watchlist + paper portfolio symbols
+        if FINNHUB_API_KEY:
+            _earn_events = mod_alerts.check_earnings_soon(days_ahead=7)
+            if _earn_events:
+                st.session_state["_earnings_soon_recent"] = _earn_events
+    _recent_triggered = st.session_state.get("_alerts_triggered_recent", [])
+    if _recent_triggered:
+        for _al in _recent_triggered:
             _lbl = mod_alerts.ALERT_TYPES.get(_al["type"], _al["type"])
             st.warning(
                 f"🔔 **{_al['symbol']}** — {_lbl} {_al['threshold']} "
                 f"(current: {_al.get('triggered_val','?')})"
             )
+    for _ee in st.session_state.get("_earnings_soon_recent", []):
+        _when = "today" if _ee["days_until"] == 0 else f"in {_ee['days_until']}d"
+        _hr   = f" ({_ee['hour']})" if _ee.get("hour") else ""
+        st.info(f"📅 **{_ee['symbol']}** reports earnings {_when} — {_ee['date']}{_hr}")
     _active_count = sum(1 for a in mod_alerts.load_alerts() if a.get("active"))
     if _active_count:
         st.caption(f"🔔 {_active_count} active alert{'s' if _active_count > 1 else ''}")
@@ -691,43 +699,50 @@ with st.sidebar:
     st.markdown("---")
 
     # ── API / Data Source Health ───────────────────────────────────────────
+    # Key status renders instantly; live connectivity test only on button click
+    # (previously fired SPY + AAPL network calls on EVERY rerun of EVERY page).
     with st.expander("🔌 Data Sources", expanded=False):
-        # yfinance
-        try:
-            _yf_test = get_ticker_info("SPY")
-            if _yf_test:
-                st.markdown("✅ **yfinance** — working")
-            else:
-                st.markdown("⚠️ **yfinance** — returned empty data")
-        except Exception as _e:
-            st.markdown(f"❌ **yfinance** — {_e}")
-
-        # Claude API
-        if ANTHROPIC_API_KEY:
-            st.markdown("✅ **Claude AI** — key configured")
-        else:
-            st.markdown("⚠️ **Claude AI** — key missing (Expert Panel, Macro AI disabled)")
-
-        # Finnhub
-        if FINNHUB_API_KEY:
-            try:
-                _fh_test = mod_finnhub.fetch_all("AAPL")
-                if "rec_error" in _fh_test or "error" in _fh_test:
-                    _fh_err = _fh_test.get("rec_error") or _fh_test.get("error", "")
-                    st.markdown(f"⚠️ **Finnhub** — key set but call failed: {_fh_err[:60]}")
-                else:
-                    st.markdown("✅ **Finnhub** — working")
-            except Exception as _e:
-                st.markdown(f"❌ **Finnhub** — {str(_e)[:60]}")
-        else:
-            st.markdown("⚠️ **Finnhub** — key missing (Analyst tab uses Yahoo Finance fallback)")
-
-        # FRED
         from config import FRED_API_KEY as _fred_key
-        if _fred_key:
-            st.markdown("✅ **FRED** — key configured")
-        else:
-            st.markdown("⚠️ **FRED** — key missing (Yield Curve uses yfinance approx; CPI/Fed Rate/Unemployment unavailable)")
+        st.markdown(("✅" if ANTHROPIC_API_KEY else "⚠️") + " **Claude AI** — " +
+                    ("key configured" if ANTHROPIC_API_KEY else "key missing (Expert Panel, Macro AI disabled)"))
+        st.markdown(("✅" if FINNHUB_API_KEY else "⚠️") + " **Finnhub** — " +
+                    ("key configured" if FINNHUB_API_KEY else "key missing (Analyst tab uses Yahoo Finance fallback)"))
+        st.markdown(("✅" if _fred_key else "⚠️") + " **FRED** — " +
+                    ("key configured" if _fred_key else "key missing (Yield Curve uses yfinance approx)"))
+
+        if st.button("🔄 Test live connectivity", key="_ds_test"):
+            try:
+                _yf_test = get_ticker_info("SPY")
+                st.markdown("✅ **yfinance** — working" if _yf_test else "⚠️ **yfinance** — empty data")
+            except Exception as _e:
+                st.markdown(f"❌ **yfinance** — {_e}")
+            if FINNHUB_API_KEY:
+                try:
+                    _fh_test = mod_finnhub.fetch_all("AAPL")
+                    if "rec_error" in _fh_test or "error" in _fh_test:
+                        _fh_err = _fh_test.get("rec_error") or _fh_test.get("error", "")
+                        st.markdown(f"⚠️ **Finnhub** — call failed: {_fh_err[:60]}")
+                    else:
+                        st.markdown("✅ **Finnhub** — working")
+                except Exception as _e:
+                    st.markdown(f"❌ **Finnhub** — {str(_e)[:60]}")
+
+    # ── 📚 Glossary (educational) ──────────────────────────────────────────
+    with st.expander("📚 Glossary", expanded=False):
+        _gl_q = st.text_input("Search term", key="_gloss_q",
+                              placeholder="e.g. RSI, Kelly, drift...",
+                              label_visibility="collapsed")
+        _gl_items = sorted(mod_gloss.TIP.items())
+        if _gl_q.strip():
+            _q = _gl_q.strip().lower()
+            _gl_items = [(k, v) for k, v in _gl_items
+                         if _q in k.lower() or _q in v.lower()]
+        for _gk, _gv in _gl_items[:12]:
+            _gname = _gk.replace("_", " ").title()
+            st.markdown(f"**{_gname}** — <span style='font-size:11px;color:#8a9bc2'>{_gv}</span>",
+                        unsafe_allow_html=True)
+        if len(_gl_items) > 12:
+            st.caption(f"...{len(_gl_items) - 12} more — refine the search")
 
     st.markdown("---")
     st.caption("Data: Yahoo Finance · Refreshed every 15 min")
@@ -985,10 +1000,10 @@ if page == "🔍 Analyze":
         st.markdown("---")
 
         # ── Tabs ─────────────────────────────────────────────────────────────
-        tab_ov, tab_fund, tab_tech, tab_inst, tab_macro_peers, tab_experts, tab_seasonal, tab_13f = st.tabs([
+        tab_ov, tab_fund, tab_tech, tab_inst, tab_macro_peers, tab_experts, tab_seasonal, tab_13f, tab_dcf, tab_fm, tab_risk = st.tabs([
             "📊 Overview", "💰 Fundamentals + Earnings", "📐 Technical + Momentum",
             "🏦 Institutional + Analysts", "🌍 Macro + Peers + History", "🧠 Experts",
-            "📅 Seasonality", "🏛 13F Smart Money",
+            "📅 Seasonality", "🏛 13F Smart Money", "💎 DCF", "🏦 Fund Models", "🛡 Risk & Sizing",
         ])
 
         # ── Overview ─────────────────────────────────────────────────────────
@@ -1069,14 +1084,31 @@ if page == "🔍 Analyze":
                     st.caption("No active signals.")
                 _rsi_ov = t_data.get("rsi")
                 if _rsi_ov:
-                    _rc_ov = "#ea3a44" if _rsi_ov > 70 else "#16c784" if _rsi_ov < 30 else "#8a9bc2"
-                    st.markdown(
-                        f'<div style="margin-top:8px;font-family:var(--mono);font-size:12px">'
-                        f'RSI: <b style="color:{_rc_ov}">{_rsi_ov:.1f}</b>'
-                        f'{"  ⚠️ Overbought" if _rsi_ov > 70 else "  ✅ Oversold zone" if _rsi_ov < 30 else ""}'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
+                    # Context-aware: verdict + hover tooltip depend on THIS stock's trend regime
+                    try:
+                        _rctx_ov = mod_mctx.rsi_in_context(
+                            get_price_history(symbol, period="2y")["Close"].squeeze())
+                    except Exception:
+                        _rctx_ov = {"error": True}
+                    if not _rctx_ov.get("error"):
+                        _rc_ov = _rctx_ov["verdict_color"]
+                        _rb_lo_ov, _rb_hi_ov = _rctx_ov["normal_band"]
+                        st.markdown(
+                            f'<div style="margin-top:8px;font-family:var(--mono);font-size:12px;'
+                            f'cursor:help" title="{_html.escape(_rctx_ov["tooltip"], quote=True)}">'
+                            f'RSI: <b style="color:{_rc_ov}">{_rsi_ov:.1f}</b>'
+                            f' <span style="color:{_rc_ov};font-size:11px">· {_html.escape(_rctx_ov["verdict"])}</span>'
+                            f' <span style="color:#556070;font-size:10px">(normal here: {_rb_lo_ov}–{_rb_hi_ov} — hover ⓘ)</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        _rc_ov = "#ea3a44" if _rsi_ov > 70 else "#16c784" if _rsi_ov < 30 else "#8a9bc2"
+                        st.markdown(
+                            f'<div style="margin-top:8px;font-family:var(--mono);font-size:12px">'
+                            f'RSI: <b style="color:{_rc_ov}">{_rsi_ov:.1f}</b></div>',
+                            unsafe_allow_html=True,
+                        )
 
             with col_mo_ov:
                 st.markdown('<div class="panel-head">MOMENTUM</div>', unsafe_allow_html=True)
@@ -1261,6 +1293,84 @@ if page == "🔍 Analyze":
 
         # ── Fundamental + Earnings ────────────────────────────────────────────
         with tab_fund:
+            # ── 🎯 In-Context Read — every metric judged for THIS stock ──────
+            try:
+                from modules.market_context import get_regime as _icr_regime
+                _icr_reg = _icr_regime()
+            except Exception:
+                _icr_reg = {}
+            try:
+                _icr_close = get_price_history(symbol, period="2y")["Close"].squeeze()
+            except Exception:
+                _icr_close = None
+            _icr = mod_mctx.interpret_all(symbol, info, _icr_close, _icr_reg)
+            if _icr:
+                _icr_rows = ""
+                for _lbl_i, _r_i in _icr.items():
+                    _icr_rows += (
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                        f'gap:10px;padding:7px 4px;border-bottom:1px solid #1e2535;cursor:help" '
+                        f'title="{_html.escape(_r_i["detail"], quote=True)}">'
+                        f'<span style="font-size:12px;color:#8a9bc2;min-width:105px">{_html.escape(_lbl_i)}</span>'
+                        f'<span style="font-family:IBM Plex Mono,monospace;font-size:13px;'
+                        f'font-weight:700;color:#e8edf8">{_html.escape(_r_i["value_s"])}</span>'
+                        f'<span style="font-size:10px;color:#556070;flex:1;text-align:center">'
+                        f'{_html.escape(_r_i["band_s"])}</span>'
+                        f'<span style="font-size:10px;font-weight:700;color:{_r_i["color"]};'
+                        f'background:{_r_i["color"]}1a;border:1px solid {_r_i["color"]}33;'
+                        f'padding:2px 8px;border-radius:4px;white-space:nowrap">'
+                        f'{_html.escape(_r_i["verdict"])}</span>'
+                        f'</div>'
+                    )
+                st.markdown(
+                    f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:10px;'
+                    f'padding:14px 18px;margin-bottom:14px">'
+                    f'<div style="font-size:11px;color:#556070;text-transform:uppercase;'
+                    f'letter-spacing:1px;margin-bottom:6px">🎯 In-Context Read — each metric judged '
+                    f'against THIS stock\'s sector, size, growth &amp; regime · hover any row for the why</div>'
+                    f'{_icr_rows}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # ── 📚 Metric Ranges for THIS stock (educational) ────────────────
+            with st.expander("📚 What's a healthy range for THIS stock? (learning mode)", expanded=False):
+                st.caption("The same P/E can be cheap for one company and absurd for another. "
+                           "Claude assesses each metric against what's NORMAL for this stock's "
+                           "sector, size, growth profile and the current macro regime.")
+                if st.button("🎓 Assess metric ranges", key=f"_mctx_btn_{symbol}"):
+                    with st.spinner("Building context-aware ranges..."):
+                        try:
+                            from modules.market_context import get_regime as _mr_regime
+                            _mc_reg = _mr_regime()
+                            _mc_reg_s = f"{_mc_reg.get('regime','')} — VIX {_mc_reg.get('signals',{}).get('vix','?')}"
+                        except Exception:
+                            _mc_reg_s = "Unknown"
+                        _mc_profile = mod_mctx.build_profile(symbol, info, t_data.get("rsi"))
+                        st.session_state[f"_mctx_{symbol}"] = mod_mctx.contextual_ranges(
+                            symbol, json.dumps(_mc_profile, default=str), _mc_reg_s)
+                _mctx_rows = st.session_state.get(f"_mctx_{symbol}")
+                if _mctx_rows:
+                    _as_c = {"LOW": "#4da3ff", "FAIR": "#16c784", "HIGH": "#ea3a44"}
+                    for _mr in _mctx_rows:
+                        _a = str(_mr.get("assessment", "")).upper()
+                        _ac = _as_c.get(_a, "#556070")
+                        st.markdown(
+                            f'<div style="background:#161b27;border-left:3px solid {_ac};'
+                            f'border-radius:6px;padding:8px 14px;margin-bottom:6px">'
+                            f'<div style="display:flex;justify-content:space-between;flex-wrap:wrap">'
+                            f'<b style="color:#e8edf8">{_html.escape(str(_mr.get("metric","")))}'
+                            f' = {_html.escape(str(_mr.get("value","")))}</b>'
+                            f'<span style="color:{_ac};font-weight:700;font-size:12px">{_html.escape(_a)}'
+                            f' <span style="color:#8a9bc2;font-weight:400">'
+                            f'(normal here: {_html.escape(str(_mr.get("healthy_range","")))})</span></span></div>'
+                            f'<div style="font-size:12px;color:#8a9bc2;margin-top:2px">'
+                            f'{_html.escape(str(_mr.get("explanation","")))}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                elif _mctx_rows is not None:
+                    st.info("No assessment returned — check ANTHROPIC_API_KEY and retry.")
+
             col_l, col_r = st.columns(2)
             with col_l:
                 st.markdown('<div class="panel-head">KEY METRICS & MULTIPLES</div>', unsafe_allow_html=True)
@@ -1510,6 +1620,43 @@ if page == "🔍 Analyze":
                 rs    = gain / loss.replace(0, np.nan)
                 df_price["RSI"] = 100 - (100 / (1 + rs))
                 st.plotly_chart(render_price_chart(df_price, symbol), use_container_width=True)
+
+                # ── RSI in Context — trend-adjusted interpretation ────────────
+                _rctx = mod_mctx.rsi_in_context(get_price_history(symbol, period="2y")["Close"].squeeze())
+                if not _rctx.get("error"):
+                    _rb_lo, _rb_hi = _rctx["normal_band"]
+                    _rv_c = _rctx["verdict_color"]
+                    _rsi_v = _rctx["rsi"]
+                    # position of current RSI on a 0-100 strip + normal band overlay
+                    st.markdown(
+                        f'<div style="background:#161b27;border:1px solid #2a3348;'
+                        f'border-left:4px solid {_rv_c};border-radius:8px;'
+                        f'padding:14px 18px;margin:6px 0 14px 0" '
+                        f'title="{_html.escape(_rctx["tooltip"], quote=True)}">'
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                        f'flex-wrap:wrap;gap:8px">'
+                        f'<span style="font-weight:700;color:#e8edf8">RSI in Context: '
+                        f'<span style="font-family:IBM Plex Mono,monospace">{_rsi_v:.0f}</span>'
+                        f' <span style="color:{_rv_c}">· {_html.escape(_rctx["verdict"])}</span></span>'
+                        f'<span style="font-size:11px;color:#8a9bc2">{_html.escape(_rctx["regime"])} '
+                        f'→ normal band here: <b style="color:#e8edf8">{_rb_lo}–{_rb_hi}</b> '
+                        f'(not the textbook 30–70)</span></div>'
+                        # visual strip: 0-100 with band + marker
+                        f'<div style="position:relative;height:14px;background:#0e1117;'
+                        f'border-radius:7px;margin:10px 0 4px 0">'
+                        f'<div style="position:absolute;left:{_rb_lo}%;width:{_rb_hi-_rb_lo}%;height:100%;'
+                        f'background:#16c78422;border-left:1px solid #16c78455;'
+                        f'border-right:1px solid #16c78455;border-radius:2px"></div>'
+                        f'<div style="position:absolute;left:calc({min(99, max(1, _rsi_v))}% - 5px);top:-3px;'
+                        f'width:10px;height:20px;background:{_rv_c};border-radius:3px"></div>'
+                        f'</div>'
+                        f'<div style="display:flex;justify-content:space-between;font-size:9px;color:#556070">'
+                        f'<span>0</span><span>25</span><span>50</span><span>75</span><span>100</span></div>'
+                        f'<div style="font-size:12px;color:#cdd6f4;margin-top:8px;line-height:1.55">'
+                        f'{_html.escape(_rctx["detail"])}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
             else:
                 st.warning("No price data available.")
 
@@ -1718,6 +1865,46 @@ if page == "🔍 Analyze":
                         font_color="#e8eaf6", margin=dict(t=10, b=10),
                     )
                     st.plotly_chart(fig_i, use_container_width=True)
+
+            # ── Insider Sentiment (MSPR, Finnhub) ─────────────────────────────
+            if FINNHUB_API_KEY:
+                st.markdown("---")
+                st.subheader("Insider Sentiment — MSPR (12 months)")
+                st.caption(
+                    "Monthly Share Purchase Ratio, -100 to +100. Positive = insiders "
+                    "net buying (bullish); negative = net selling. Source: Finnhub."
+                )
+                _mspr_rows = mod_finnhub.get_insider_sentiment(symbol)
+                if _mspr_rows:
+                    import calendar as _ins_cal
+                    _mspr_x = [f"{_ins_cal.month_abbr[r['month']]} '{str(r['year'])[2:]}"
+                               for r in _mspr_rows]
+                    _mspr_y = [r.get("mspr") or 0 for r in _mspr_rows]
+                    _mspr_colors = ["#16c784" if v >= 0 else "#ea3a44" for v in _mspr_y]
+                    _fig_mspr = go.Figure(go.Bar(
+                        x=_mspr_x, y=_mspr_y, marker_color=_mspr_colors,
+                        hovertemplate="%{x}: MSPR %{y:.1f}<extra></extra>",
+                    ))
+                    _fig_mspr.add_hline(y=0, line=dict(color="#556070", width=1))
+                    _fig_mspr.update_layout(
+                        height=240, margin=dict(l=0, r=0, t=10, b=0),
+                        paper_bgcolor="#0e1117", plot_bgcolor="#1a1f2e",
+                        font_color="#e8eaf6",
+                        yaxis=dict(title="MSPR", range=[-100, 100],
+                                   gridcolor="#1e2535"),
+                        xaxis=dict(showgrid=False),
+                    )
+                    st.plotly_chart(_fig_mspr, use_container_width=True)
+                    _mspr_avg = sum(_mspr_y) / len(_mspr_y)
+                    _mspr_recent = sum(_mspr_y[-3:]) / min(3, len(_mspr_y))
+                    if _mspr_recent > 10:
+                        st.markdown("🟢 **Recent insider sentiment is bullish** — net buying over the last 3 months.")
+                    elif _mspr_recent < -10:
+                        st.markdown("🔴 **Recent insider sentiment is bearish** — net selling over the last 3 months.")
+                    else:
+                        st.markdown("🟡 **Recent insider sentiment is neutral** — no strong buying or selling bias.")
+                else:
+                    st.info("No insider sentiment data available for this stock.")
 
             # Analysts & News
             st.markdown("---")
@@ -2229,6 +2416,100 @@ if page == "🔍 Analyze":
                     if len(_experts) > 4:
                         _render_expert_row(st.columns(4), _experts[4:])
 
+                    # ── Panel Synthesis — the moderator's distilled verdict ──
+                    st.markdown("---")
+                    st.subheader("🧑‍⚖️ Panel Verdict — distilled committee decision")
+                    st.caption("A moderator weighs all personas by fit to THIS stock, resolves "
+                               "the debate, flags missing perspectives, and hands you a full "
+                               "position strategy: sizing, leverage, hedging, entry/exit, warning signs.")
+                    if st.button("⚖️ Distill Panel Verdict", type="primary", key="panel_verdict_btn"):
+                        with st.spinner("Moderator is weighing the panel..."):
+                            _exp_compact = json.dumps([{
+                                "name": e["name"], "decision": e.get("decision"),
+                                "conviction": e.get("conviction"),
+                                "time_horizon": e.get("time_horizon"),
+                                "entry_price": e.get("entry_price"),
+                                "target_price": e.get("target_price"),
+                                "stop_loss_pct": e.get("stop_loss_pct"),
+                                "position_size_pct": e.get("position_size_pct"),
+                                "rationale": e.get("rationale"),
+                                "key_risks": e.get("key_risks", []),
+                            } for e in _experts], default=str)
+                            _summary_for_syn = json.dumps(s_data, default=str)
+                            _syn = mod_experts.panel_synthesis(
+                                symbol, round(float(price_now or 0), 2),
+                                _exp_compact, _summary_for_syn,
+                            )
+                            st.session_state[f"panel_syn_{symbol}"] = _syn
+
+                    if f"panel_syn_{symbol}" in st.session_state:
+                        _syn = st.session_state[f"panel_syn_{symbol}"]
+                        if _syn.get("error"):
+                            st.error(_syn["error"])
+                        else:
+                            _sv = _syn.get("final_verdict", "HOLD")
+                            _sv_c = {"STRONG BUY": "#00c853", "BUY": "#64dd17",
+                                     "HOLD": "#ffd600", "WATCH": "#ff9800",
+                                     "AVOID": "#ff6d00", "SELL": "#ff1744"}.get(_sv, "#9fa8da")
+                            _sconv = _syn.get("conviction", 5)
+                            st.markdown(
+                                f'<div style="background:#1a1f2e;border:2px solid {_sv_c};'
+                                f'border-radius:12px;padding:20px 24px;margin:10px 0">'
+                                f'<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
+                                f'<span style="font-family:IBM Plex Mono,monospace;font-size:26px;'
+                                f'font-weight:900;color:{_sv_c}">{_html.escape(_sv)}</span>'
+                                f'<span style="font-size:13px;color:#8a9bc2">Conviction '
+                                f'<b style="color:#e8edf8">{_sconv}/10</b></span></div>'
+                                f'<div style="font-size:15px;color:#e8edf8;margin-top:10px;'
+                                f'font-weight:600">{_html.escape(str(_syn.get("one_liner","")))}</div>'
+                                f'<div style="font-size:12px;color:#8a9bc2;margin-top:8px">'
+                                f'{_html.escape(str(_syn.get("weighing_note","")))}</div>'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
+                            if _syn.get("key_debate"):
+                                st.markdown(f"**🥊 The Debate:** {_syn['key_debate']}")
+                            if _syn.get("missing_perspectives"):
+                                st.markdown("**🪑 Missing from the panel:**")
+                                for _mp in _syn["missing_perspectives"]:
+                                    st.markdown(f"- **{_mp.get('persona','')}** — {_mp.get('would_add','')}")
+
+                            _ps = _syn.get("position_strategy", {})
+                            if _ps:
+                                st.markdown("#### 📋 Position Strategy")
+                                _ps1, _ps2, _ps3 = st.columns(3)
+                                _ps1.metric("Suggested Allocation",
+                                            f"{_ps.get('allocation_pct', '—')}%",
+                                            help=mod_gloss.TIP["position_sizing"])
+                                _lev = _ps.get("leverage") or "—"
+                                _ps2.metric("Leverage", str(_lev),
+                                            help=mod_gloss.TIP["leverage"])
+                                _hedge_short = "See below"
+                                _ps3.metric("Hedging", _hedge_short,
+                                            help=mod_gloss.TIP["hedging"])
+
+                                _ps_rows = [
+                                    ("⚡ Leverage", _ps.get("leverage_note")),
+                                    ("🛡 Hedging", _ps.get("hedging")),
+                                    ("🚪 Entry Plan", _ps.get("entry_plan")),
+                                    ("🏁 Exit Plan", _ps.get("exit_plan")),
+                                    ("➕ Add Zones", _ps.get("add_zones")),
+                                ]
+                                for _lbl_ps, _txt_ps in _ps_rows:
+                                    if _txt_ps:
+                                        st.markdown(f"**{_lbl_ps}:** {_txt_ps}")
+                                _wc1, _wc2 = st.columns(2)
+                                with _wc1:
+                                    if _ps.get("warning_signs"):
+                                        st.markdown("**🚨 What should worry you:**")
+                                        for _ws in _ps["warning_signs"]:
+                                            st.markdown(f"- {_ws}")
+                                with _wc2:
+                                    if _ps.get("watch_carefully"):
+                                        st.markdown("**👁 Watch carefully:**")
+                                        for _wc in _ps["watch_carefully"]:
+                                            st.markdown(f"- {_wc}")
+
         # ── Seasonality ──────────────────────────────────────────────────────────
         with tab_seasonal:
             st.subheader("📅 Monthly Seasonality")
@@ -2424,12 +2705,470 @@ if page == "🔍 Analyze":
                     f"Change = vs. prior quarter filing."
                 )
 
+        # ── DCF Valuation (dcf-valuation skill) ──────────────────────────────
+        with tab_dcf:
+            st.subheader(f"💎 DCF Intrinsic Value — {symbol}")
+            st.caption("Two-stage discounted-cash-flow model: 5-year FCF projection + Gordon "
+                       "terminal value. Adjust assumptions below — defaults come from the "
+                       "stock's own history.")
+
+            _dcf_in = mod_dcf.get_dcf_inputs(symbol)
+            if _dcf_in.get("error"):
+                st.info(f"DCF unavailable: {_dcf_in['error']}")
+            elif _dcf_in.get("negative_fcf"):
+                st.warning("This company has negative free cash flow — a standard DCF is not "
+                           "meaningful. Valuation should rely on revenue multiples or "
+                           "path-to-profitability analysis instead.")
+            else:
+                _dc1, _dc2, _dc3 = st.columns(3)
+                with _dc1:
+                    _g5 = st.slider("FCF growth (5y, %/yr)", -10.0, 40.0,
+                                    float(_dcf_in["suggested_g"] * 100), 0.5,
+                                    key=f"_dcf_g_{symbol}",
+                                    help="Suggested from historical FCF CAGR") / 100
+                with _dc2:
+                    _beta_def = _dcf_in.get("beta") or 1.0
+                    _wacc_def = min(15.0, max(7.0, 4.5 + 5.0 * float(_beta_def)))
+                    _wacc = st.slider("Discount rate / WACC (%)", 6.0, 18.0,
+                                      round(_wacc_def, 1), 0.5,
+                                      key=f"_dcf_w_{symbol}",
+                                      help="Default ≈ risk-free 4.5% + beta × 5% equity premium") / 100
+                with _dc3:
+                    _gt = st.slider("Terminal growth (%)", 0.0, 4.0, 2.5, 0.25,
+                                    key=f"_dcf_t_{symbol}") / 100
+
+                _dcf_res = mod_dcf.run_dcf(
+                    _dcf_in["base_fcf"], _g5, _gt, _wacc,
+                    _dcf_in["net_debt"], _dcf_in["shares_out"],
+                )
+                if _dcf_res.get("error"):
+                    st.error(_dcf_res["error"])
+                else:
+                    _iv    = _dcf_res["intrinsic_ps"]
+                    _px    = _dcf_in["price"]
+                    _ups   = (_iv / _px - 1) * 100 if _px > 0 else 0
+                    _ups_c = "#16c784" if _ups > 15 else ("#ea3a44" if _ups < -15 else "#f0b90b")
+                    _verdict = ("UNDERVALUED" if _ups > 15 else
+                                "OVERVALUED" if _ups < -15 else "FAIRLY VALUED")
+
+                    _dm1, _dm2, _dm3, _dm4 = st.columns(4)
+                    _dm1.metric("Intrinsic Value", f"${_iv:,.2f}",
+                                help=mod_gloss.TIP["intrinsic_value"])
+                    _dm2.metric("Market Price", f"${_px:,.2f}")
+                    _dm3.metric("Upside / Downside", f"{_ups:+.1f}%",
+                                help=mod_gloss.TIP["dcf"])
+                    _dm4.metric("Terminal Weight", f"{_dcf_res['terminal_weight']:.0f}%",
+                                help="Share of value from the terminal period. Above ~80% = "
+                                     "valuation highly sensitive to terminal assumptions.")
+                    st.markdown(
+                        f'<div style="background:{_ups_c}18;border:1px solid {_ups_c}50;'
+                        f'border-radius:8px;padding:10px 16px;margin:8px 0;'
+                        f'color:{_ups_c};font-weight:700;font-family:IBM Plex Mono,monospace">'
+                        f'{_verdict} by DCF at these assumptions</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # FCF projection chart
+                    _proj = _dcf_res["fcf_projection"]
+                    _fig_dcf = go.Figure()
+                    _fig_dcf.add_trace(go.Bar(
+                        x=[f"Y{p['year']}" for p in _proj],
+                        y=[p["fcf"] / 1e9 for p in _proj],
+                        name="Projected FCF", marker_color="#4da3ff", opacity=0.8,
+                    ))
+                    _fig_dcf.add_trace(go.Bar(
+                        x=[f"Y{p['year']}" for p in _proj],
+                        y=[p["pv"] / 1e9 for p in _proj],
+                        name="Present Value", marker_color="#16c784", opacity=0.8,
+                    ))
+                    _fig_dcf.update_layout(
+                        barmode="group", height=240,
+                        margin=dict(l=0, r=0, t=10, b=0),
+                        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                        font=dict(color="#cdd6f4"),
+                        yaxis=dict(title="$B", gridcolor="#1e2535"),
+                        legend=dict(orientation="h", y=1.1, x=0),
+                    )
+                    st.plotly_chart(_fig_dcf, use_container_width=True,
+                                    config={"displayModeBar": False})
+
+                    # Sensitivity matrix
+                    st.markdown("**Sensitivity — Intrinsic Value per Share** (growth × discount)")
+                    _sens = mod_dcf.sensitivity_matrix(
+                        _dcf_in["base_fcf"], _gt, _dcf_in["net_debt"],
+                        _dcf_in["shares_out"], _g5, _wacc,
+                    )
+                    def _sens_color(v):
+                        if pd.isna(v):
+                            return ""
+                        return ("color: #16c784" if v > _px * 1.15 else
+                                "color: #ea3a44" if v < _px * 0.85 else "color: #f0b90b")
+                    st.dataframe(
+                        _sens.style.format("${:,.0f}").map(_sens_color),
+                        use_container_width=True,
+                    )
+                    st.caption("Green = >15% above market price at those assumptions · "
+                               "Red = >15% below · Amber = near market price.")
+
+        # ── Fund Models (quantitative hedge-fund rulebooks) ──────────────────
+        with tab_fm:
+            st.subheader(f"🏦 Fund Models — {symbol}")
+            st.caption("Famous fund rulebooks applied mechanically — no AI, pure rules. "
+                       "How would each discipline treat this stock right now?")
+
+            _fm = mod_fm.analyze_stock(symbol)
+            if _fm.get("error"):
+                st.info(f"Fund models unavailable: {_fm['error']}")
+            else:
+                _fm_c1, _fm_c2 = st.columns(2)
+
+                # ── Minervini Trend Template ─────────────────────────────────
+                with _fm_c1:
+                    _min = _fm["minervini"]
+                    _min_pass = _min["passed"]
+                    _min_c = "#16c784" if _min_pass == 7 else ("#f0b90b" if _min_pass >= 5 else "#ea3a44")
+                    st.markdown(
+                        f'<div style="background:#161b27;border:1px solid #2a3348;border-left:4px solid {_min_c};'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px">'
+                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:2px">'
+                        f'📈 Minervini Trend Template <span style="color:{_min_c}">'
+                        f'{_min_pass}/{_min["total"]}</span></div>'
+                        f'<div style="font-size:12px;color:#8a9bc2;margin-bottom:8px">{_min["verdict"]}</div>'
+                        + "".join(
+                            f'<div style="font-size:12px;color:{"#16c784" if ok else "#ea3a44"};'
+                            f'padding:1px 0">{"✓" if ok else "✗"} {lbl}</div>'
+                            for lbl, ok in _min["checks"]
+                        ) + '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # ── Turtle / Donchian ────────────────────────────────────
+                    _tur = _fm["turtle"]
+                    st.markdown(
+                        f'<div style="background:#161b27;border:1px solid #2a3348;'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px">'
+                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:6px">🐢 Turtle Breakout Rules</div>'
+                        f'<div style="font-size:12px;color:#cdd6f4">System 1 (20d): {_tur["s1"]}</div>'
+                        f'<div style="font-size:12px;color:#cdd6f4">System 2 (55d): {_tur["s2"]}</div>'
+                        + (f'<div style="font-size:11px;color:#556070;margin-top:6px">'
+                           f'20d high ${_tur["hi20"]:,.2f} · 55d high ${_tur["hi55"]:,.2f} · '
+                           f'exit lows ${_tur["lo10"]:,.2f}/${_tur["lo20"]:,.2f}</div>'
+                           if _tur.get("hi20") else "")
+                        + '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # ── Trend following ──────────────────────────────────────
+                    _tr = _fm["trend"]
+                    _tr_c = {"LONG": "#16c784", "SHORT/AVOID": "#ea3a44",
+                             "MIXED": "#f0b90b"}.get(_tr["signal"], "#556070")
+                    st.markdown(
+                        f'<div style="background:#161b27;border:1px solid #2a3348;'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px">'
+                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:4px">'
+                        f'📉 Managed-Futures Trend: <span style="color:{_tr_c}">{_tr["signal"]}</span></div>'
+                        f'<div style="font-size:12px;color:#8a9bc2">{_tr["detail"]}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                with _fm_c2:
+                    # ── Druckenmiller ────────────────────────────────────────
+                    _dr = _fm["druck"]
+                    st.markdown(
+                        f'<div style="background:#161b27;border:1px solid #2a3348;'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px">'
+                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:4px">🎯 Druckenmiller Playbook</div>'
+                        f'<div style="font-size:12px;color:#f0b90b;margin-bottom:8px">{_dr["verdict"]}</div>'
+                        + "".join(f'<div style="font-size:12px;color:#cdd6f4;padding:1px 0">{e} {m}</div>'
+                                  for e, m in _dr.get("points", []))
+                        + '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # ── Kelly sizing ─────────────────────────────────────────
+                    _ke = _fm["kelly"]
+                    if _ke.get("kelly") is not None:
+                        _ke_c = "#16c784" if _ke["kelly"] > 0 else "#ea3a44"
+                        st.markdown(
+                            f'<div style="background:#161b27;border:1px solid #2a3348;'
+                            f'border-radius:8px;padding:14px 18px;margin-bottom:10px">'
+                            f'<div style="font-weight:700;color:#e8edf8;margin-bottom:6px">🎲 Kelly Position Sizing</div>'
+                            f'<div style="font-size:12px;color:#cdd6f4">'
+                            f'Monthly win rate <b>{_ke["win_rate"]}%</b> · payoff ratio <b>{_ke["payoff"]}</b> '
+                            f'({_ke["n_months"]} months)</div>'
+                            f'<div style="font-size:13px;margin-top:6px">Full Kelly: '
+                            f'<b style="color:{_ke_c}">{_ke["kelly"]}%</b> of capital · '
+                            f'Half-Kelly (practical): <b style="color:{_ke_c}">{_ke["half_kelly"]}%</b></div>'
+                            f'<div style="font-size:11px;color:#556070;margin-top:4px">{_ke["note"]}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.info(f"Kelly sizing: {_ke.get('note', 'unavailable')}")
+
+                    # ── Factor profile radar ─────────────────────────────────
+                    _fac = _fm["factors"]
+                    _f_names = list(_fac["scores"].keys())
+                    _f_vals  = list(_fac["scores"].values())
+                    _fig_rad = go.Figure(go.Scatterpolar(
+                        r=_f_vals + [_f_vals[0]],
+                        theta=_f_names + [_f_names[0]],
+                        fill="toself", fillcolor="rgba(77,163,255,0.15)",
+                        line=dict(color="#4da3ff", width=2),
+                    ))
+                    _fig_rad.update_layout(
+                        polar=dict(
+                            bgcolor="#0e1117",
+                            radialaxis=dict(range=[0, 10], gridcolor="#1e2535",
+                                            tickfont=dict(size=9, color="#556070")),
+                            angularaxis=dict(gridcolor="#1e2535",
+                                             tickfont=dict(size=11, color="#cdd6f4")),
+                        ),
+                        paper_bgcolor="#0e1117", height=280,
+                        margin=dict(l=40, r=40, t=25, b=25), showlegend=False,
+                        title=dict(text="Factor Profile", font=dict(size=12, color="#cdd6f4"), x=0),
+                    )
+                    st.plotly_chart(_fig_rad, use_container_width=True,
+                                    config={"displayModeBar": False})
+                    st.markdown("**Style fit:**")
+                    for _sf in _fac["style_fits"]:
+                        st.markdown(f"- {_sf}")
+
+        # ── Risk & Sizing (trader's risk-first workflow) ─────────────────────
+        with tab_risk:
+            st.subheader(f"🛡 Risk & Sizing — {symbol}")
+
+            # ── 1. Trade Planner ─────────────────────────────────────────────
+            st.markdown("#### 📐 Trade Planner — position sizing from risk, not conviction")
+            st.caption("Van Tharp 1R method: decide how much you're willing to LOSE first, "
+                       "place the stop at a technical level, and the position size falls out.")
+
+            _ti = mod_rt.get_trade_inputs(symbol)
+            if _ti.get("error"):
+                st.info(f"Trade planner unavailable: {_ti['error']}")
+            else:
+                _tp_c1, _tp_c2, _tp_c3, _tp_c4 = st.columns(4)
+                with _tp_c1:
+                    _acct = st.number_input("Account size ($)", value=50_000, step=5_000,
+                                            key=f"_rt_acct_{symbol}")
+                with _tp_c2:
+                    _riskp = st.slider("Risk per trade (%)", 0.25, 3.0, 1.0, 0.25,
+                                       key=f"_rt_risk_{symbol}",
+                                       help="Pros risk 0.5-2% of the account per trade")
+                with _tp_c3:
+                    _stop_mode = st.selectbox("Stop placement",
+                                              ["2× ATR", "3× ATR", "Swing low (10d)", "Manual"],
+                                              key=f"_rt_stopm_{symbol}")
+                with _tp_c4:
+                    _tgt = st.number_input("Target price ($)",
+                                           value=round(_ti["price"] * 1.25, 2),
+                                           step=1.0, key=f"_rt_tgt_{symbol}")
+
+                _stop_manual = None
+                if _stop_mode == "Manual":
+                    _stop_manual = st.number_input("Manual stop ($)",
+                                                   value=round(_ti["price"] * 0.92, 2),
+                                                   step=0.5, key=f"_rt_stopv_{symbol}")
+                elif _stop_mode == "Swing low (10d)":
+                    _stop_manual = _ti["swing_low"] * 0.995   # just under the swing low
+
+                _plan_rt = mod_rt.trade_plan(
+                    _ti["price"], _ti["atr"], float(_acct), float(_riskp),
+                    atr_mult=3.0 if _stop_mode == "3× ATR" else 2.0,
+                    target_price=float(_tgt) if _tgt else None,
+                    stop_price=_stop_manual,
+                )
+                if _plan_rt.get("error"):
+                    st.error(_plan_rt["error"])
+                else:
+                    _rr = _plan_rt.get("reward_risk")
+                    _rr_c = "#16c784" if (_rr or 0) >= 2 else "#ea3a44"
+                    _rm1, _rm2, _rm3, _rm4, _rm5, _rm6 = st.columns(6)
+                    _rm1.metric("Entry", f"${_ti['price']:,.2f}")
+                    _rm2.metric("Stop", f"${_plan_rt['stop_price']:,.2f}",
+                                f"-{_plan_rt['stop_dist_pct']:.1f}%", delta_color="off",
+                                help=mod_gloss.TIP["stop_loss"])
+                    _rm3.metric("Shares", f"{_plan_rt['shares']:,}",
+                                help=mod_gloss.TIP["position_sizing"])
+                    _rm4.metric("Position", f"${_plan_rt['position_usd']:,.0f}",
+                                f"{_plan_rt['position_pct']:.1f}% of acct", delta_color="off")
+                    _rm5.metric("1R (risk)", f"${_plan_rt['risk_budget']:,.0f}",
+                                help=mod_gloss.TIP["r_multiple"])
+                    _rm6.metric("Reward/Risk", f"{_rr:.1f}R" if _rr else "—",
+                                help=mod_gloss.TIP["reward_risk"])
+                    if _plan_rt.get("chandelier"):
+                        st.caption(f"🕯 Chandelier trailing stop (3×ATR): "
+                                   f"**${_plan_rt['chandelier']:,.2f}** — raise it as the price rises, never lower it.")
+                    for _w in _plan_rt.get("warnings", []):
+                        st.warning(_w)
+
+            # ── 2. Portfolio Fit ─────────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("#### 🧩 Portfolio Fit — diversifier or duplicate?")
+            _fit_src = []
+            try:
+                _tp_all = mod_tp.load_all()["portfolios"]
+                for _fit_name, _fit_tp in _tp_all.items():
+                    _fit_src.append((f"Tracker: {_fit_name}", tuple(sorted(_fit_tp["positions"].keys()))))
+            except Exception:
+                pass
+            try:
+                _pp_all = mod_pp.load_all()["portfolios"]
+                for _fit_name, _fit_pp in _pp_all.items():
+                    if _fit_pp.get("holdings"):
+                        _fit_src.append((f"Paper: {_fit_name}", tuple(sorted(_fit_pp["holdings"].keys()))))
+            except Exception:
+                pass
+
+            if not _fit_src:
+                st.info("No tracked or paper portfolios with holdings — build one to check fit.")
+            else:
+                _fit_choice = st.selectbox("Compare against", [n for n, _ in _fit_src],
+                                           key=f"_rt_fit_{symbol}")
+                _fit_syms = dict(_fit_src)[_fit_choice]
+                with st.spinner("Computing correlations..."):
+                    _fit = mod_rt.portfolio_fit(symbol, _fit_syms)
+                if _fit.get("error"):
+                    st.info(_fit["error"])
+                else:
+                    _fc1, _fc2, _fc3 = st.columns(3)
+                    _fc1.metric("Beta vs SPY", f"{_fit['beta']:.2f}" if _fit["beta"] is not None else "—",
+                                help=mod_gloss.TIP["beta"])
+                    _fc2.metric("Avg Correlation", f"{_fit['avg_corr']:.2f}" if _fit["avg_corr"] is not None else "—",
+                                help=mod_gloss.TIP["correlation"])
+                    if _fit.get("max_corr"):
+                        _fc3.metric("Most Correlated", f"{_fit['max_corr']['symbol']} "
+                                    f"({_fit['max_corr']['corr']:.2f})")
+                    _v_c = ("#ea3a44" if "DUPLICATES" in _fit["verdict"] else
+                            "#f0b90b" if "PARTIAL" in _fit["verdict"] else "#16c784")
+                    st.markdown(
+                        f'<div style="background:{_v_c}18;border:1px solid {_v_c}50;border-radius:8px;'
+                        f'padding:10px 16px;color:{_v_c};font-weight:600">{_fit["verdict"]}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if _fit["corrs"]:
+                        _corr_strip = " · ".join(f"{c['symbol']} {c['corr']:.2f}"
+                                                 for c in _fit["corrs"][:8])
+                        st.caption(f"Pairwise (6mo daily): {_corr_strip}")
+
+            # ── 3. Earnings Quality ──────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("#### 🔬 Earnings Quality — forensic red flags (short-seller lens)")
+            _eq = mod_eq.analyze(symbol)
+            if _eq.get("error"):
+                st.info(_eq["error"])
+            elif not _eq["checks"]:
+                st.info("No financial statement data available.")
+            else:
+                if _eq.get("score") is not None:
+                    _eq_c = ("#16c784" if _eq["score"] >= 7.5 else
+                             "#f0b90b" if _eq["score"] >= 5 else "#ea3a44")
+                    st.markdown(
+                        f'<div style="font-family:IBM Plex Mono,monospace;font-size:15px;'
+                        f'margin-bottom:8px">Quality Score: '
+                        f'<b style="color:{_eq_c}">{_eq["score"]}/10</b></div>',
+                        unsafe_allow_html=True,
+                    )
+                _eq_icons = {"good": "🟢", "warn": "🟡", "flag": "🔴", "na": "⚪"}
+                for _nm, _stt, _dt in _eq["checks"]:
+                    st.markdown(f"{_eq_icons.get(_stt,'⚪')} **{_nm}** — {_dt}")
+                st.caption("Checks: dilution, stock-comp burden, cash backing of earnings, "
+                           "receivables vs revenue, FCF conversion, debt trend. "
+                           "🔴 flags are what short sellers hunt for.")
 
 
 # ─── Page: Market Radar ────────────────────────────────────────────────────────
 elif page == "🌍 Market Radar":
     st.title("🌍 Market Radar — Growth Opportunities")
     st.caption("Scanning for high-momentum growth stocks and ETFs with strong fundamentals.")
+
+    # ── 👤 Insider Cluster Buys scanner ───────────────────────────────────────
+    with st.expander("👤 Insider Cluster Buys — who's buying their own stock?", expanded=False):
+        st.caption(
+            "Scans the anchor universe + your watchlist for stocks where insiders are NET "
+            "BUYING (MSPR). Insiders sell for many reasons but buy for only one. "
+            "Requires FINNHUB_API_KEY · results cached 12h."
+        )
+        if not FINNHUB_API_KEY:
+            st.warning("Add FINNHUB_API_KEY to enable the insider scanner.")
+        else:
+            if st.button("🔍 Scan for insider buying", type="primary", key="_ins_scan"):
+                _ins_universe = list(dict.fromkeys(
+                    WEEKLY_UNIVERSE[:60] +
+                    [s.strip().upper() for s in
+                     (_load_json(Path(__file__).parent / ".watchlist.json", default={})
+                      .get("symbols", "")).split(",") if s.strip()]
+                ))
+                _ins_rows = []
+                _ins_prog = st.progress(0, text="Scanning insider sentiment…")
+                for _ii, _isym in enumerate(_ins_universe):
+                    _ins_prog.progress((_ii + 1) / len(_ins_universe), text=f"Scanning {_isym}…")
+                    try:
+                        _srows = mod_finnhub.get_insider_sentiment(_isym)
+                        if not _srows:
+                            continue
+                        _last3 = [r["mspr"] for r in _srows[-3:] if r.get("mspr") is not None]
+                        if not _last3:
+                            continue
+                        _avg3 = sum(_last3) / len(_last3)
+                        _pos_months = sum(1 for r in _srows[-6:]
+                                          if (r.get("mspr") or 0) > 0)
+                        _ins_rows.append({
+                            "symbol":     _isym,
+                            "mspr_3m":    round(_avg3, 1),
+                            "pos_months": _pos_months,
+                            "latest":     _srows[-1].get("mspr"),
+                        })
+                    except Exception:
+                        continue
+                _ins_prog.empty()
+                # Cluster = sustained positive MSPR
+                _ins_rows.sort(key=lambda r: -r["mspr_3m"])
+                st.session_state["_ins_scan_res"] = _ins_rows
+
+            _ins_res = st.session_state.get("_ins_scan_res")
+            if _ins_res is not None:
+                _clusters = [r for r in _ins_res if r["mspr_3m"] >= 20 and r["pos_months"] >= 3]
+                _mild     = [r for r in _ins_res if 0 < r["mspr_3m"] < 20 and r["pos_months"] >= 3]
+                st.markdown(f"**Scanned {len(_ins_res)} stocks with insider data** · "
+                            f"🟢 {len(_clusters)} strong clusters · 🟡 {len(_mild)} mild accumulation")
+                if _clusters or _mild:
+                    _ins_rows_html = ""
+                    for _ir in (_clusters + _mild)[:20]:
+                        _ir_c = "#16c784" if _ir["mspr_3m"] >= 20 else "#f0b90b"
+                        _ins_rows_html += (
+                            f'<tr>'
+                            f'<td style="padding:6px 12px;font-weight:700">{_ir["symbol"]}</td>'
+                            f'<td style="padding:6px 12px;text-align:right;color:{_ir_c};'
+                            f'font-weight:700">{_ir["mspr_3m"]:+.0f}</td>'
+                            f'<td style="padding:6px 12px;text-align:right">'
+                            f'{_ir["pos_months"]}/6</td>'
+                            f'<td style="padding:6px 12px;text-align:right">'
+                            f'{_ir["latest"]:+.0f}</td>'
+                            f'<td style="padding:6px 12px">'
+                            f'{"🟢 Strong cluster buying" if _ir["mspr_3m"] >= 20 else "🟡 Steady accumulation"}</td>'
+                            f'</tr>'
+                        )
+                    _th_ins = "text-align:left;font-size:10px;color:#556070;padding:4px 12px;font-family:'IBM Plex Mono',monospace"
+                    _tr_ins = "text-align:right;font-size:10px;color:#556070;padding:4px 12px;font-family:'IBM Plex Mono',monospace"
+                    st.markdown(
+                        f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;'
+                        f'padding:12px 16px;overflow-x:auto">'
+                        f'<table style="width:100%;border-collapse:collapse"><thead><tr>'
+                        f'<th style="{_th_ins}">SYMBOL</th>'
+                        f'<th style="{_tr_ins}" title="Avg MSPR last 3 months. +100 = pure buying, -100 = pure selling">MSPR 3M ⓘ</th>'
+                        f'<th style="{_tr_ins}" title="Months with net insider buying out of last 6">POS MONTHS ⓘ</th>'
+                        f'<th style="{_tr_ins}">LATEST</th>'
+                        f'<th style="{_th_ins}">SIGNAL</th>'
+                        f'</tr></thead><tbody>{_ins_rows_html}</tbody></table></div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.caption("MSPR ≥ +20 for 3 months straight = a cluster — multiple insiders "
+                               "deploying real money. The strongest legal signal there is. "
+                               "Deep-dive candidates → Analyze → Institutional tab.")
+                else:
+                    st.info("No meaningful insider accumulation found in the scanned universe right now.")
 
     if st.button("🔄 Scan Market Now", type="primary"):
         rows = []
@@ -2587,6 +3326,17 @@ elif page == "💼 Portfolio":
             }).map(_cp, subset=["P&L (%)", "P&L (NIS)"])
 
             st.dataframe(styled_b, use_container_width=True, hide_index=True)
+
+            try:
+                st.download_button(
+                    "📥 Download Excel report",
+                    data=mod_xlsx.portfolio_xlsx(df, summary, title="Broker Portfolio"),
+                    file_name=f"portfolio_broker_{_date.today().isoformat()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="_pfb_xlsx",
+                )
+            except Exception:
+                pass
 
             # Quick analyze buttons for US stocks
             us_tickers = df[df["Type"] == "US Stock"]["Ticker"].dropna().tolist()
@@ -2966,6 +3716,9 @@ elif page == "💼 Portfolio":
             col_t, col_p = st.columns([3, 2])
             with col_t:
                 st.subheader("Holdings")
+                if "Price Stale" in df.columns and df["Price Stale"].any():
+                    _stale_syms = df.loc[df["Price Stale"], "Ticker"].tolist()
+                    st.warning(f"⚠ Live price unavailable for {', '.join(_stale_syms)} — shown at cost (P&L not real).")
                 cols_show = ["Ticker","Name","Shares","Avg Price","Current Price",
                              "Market Value","P&L ($)","P&L (%)","Sector"]
                 if "Score" in df.columns:
@@ -2984,6 +3737,17 @@ elif page == "💼 Portfolio":
                     "P&L (%)":       lambda x: f"{x*100:+.1f}%",
                 }).map(color_pnl, subset=["P&L ($)", "P&L (%)"])
                 st.dataframe(styled_p, use_container_width=True)
+
+                try:
+                    st.download_button(
+                        "📥 Download Excel report",
+                        data=mod_xlsx.portfolio_xlsx(df, summary),
+                        file_name=f"portfolio_{_date.today().isoformat()}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="_pf_xlsx",
+                    )
+                except Exception:
+                    pass
 
             with col_p:
                 st.subheader("Sector Exposure")
@@ -3086,11 +3850,20 @@ elif page == "💼 Portfolio":
 # ─── Page: Watchlist ──────────────────────────────────────────────────────────
 elif page == "👁 Watchlist":
     st.title("👁 Watchlist")
-    st.caption("Track multiple tickers with quick scores.")
+    st.caption("Track multiple tickers with quick scores. Your list is saved to disk automatically.")
 
-    default_watch = "NVDA, QQQ, KWEB, ARM, DDOG"
+    # Persisted to .watchlist.json — survives refresh and app restarts
+    _WL_FILE = Path(__file__).parent / ".watchlist.json"
+    _wl_saved = _load_json(_WL_FILE, default={})
+    default_watch = _wl_saved.get("symbols", "NVDA, QQQ, KWEB, ARM, DDOG")
+
     watchlist_input = st.text_input("Tickers (comma-separated)", value=default_watch)
     tickers = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
+
+    # Save whenever the list changes
+    if watchlist_input.strip() and watchlist_input != _wl_saved.get("symbols"):
+        _save_json(_WL_FILE, {"symbols": watchlist_input.strip(),
+                              "updated": datetime.now().isoformat()})
 
     if st.button("📊 Load Watchlist", type="primary"):
         rows = []
@@ -3201,6 +3974,10 @@ elif page == "⭐ Weekly Picks":
     filtered_out = output["filtered_out"]
     mkt          = regime["signals"]
 
+    if output.get("thesis_error"):
+        st.error(f"⚠ Claude buy-thesis generation failed: {output['thesis_error']} — "
+                 f"picks are shown without AI theses. Re-run the scan to retry.")
+
     # ── Market Regime banner (native Streamlit) ───────────────────────────────
     rc = regime["regime_color"]
     st.markdown(
@@ -3212,14 +3989,17 @@ elif page == "⭐ Weekly Picks":
         f'</div>',
         unsafe_allow_html=True,
     )
+    # Missing feeds show N/A instead of fabricated numbers
+    for _dw in regime.get("data_warnings", []):
+        st.warning(f"⚠ {_dw}")
     rm1, rm2, rm3, rm4 = st.columns(4)
-    rm1.metric("VIX", f"{mkt.get('vix','?')}",
+    rm1.metric("VIX", f"{mkt.get('vix') if mkt.get('vix') is not None else 'N/A'}",
                help="Market fear index. Below 18 = calm, rising market. 18-25 = neutral. Above 25 = fear, elevated risk. Above 30 = panic.")
-    rm2.metric("S&P 1M", f"{mkt.get('spy_r1m',0)*100:+.1f}%",
+    rm2.metric("S&P 1M", f"{(mkt.get('spy_r1m') or 0)*100:+.1f}%" if mkt.get('spy_r1m') is not None else "N/A",
                help="S&P 500 performance last month. Positive = market rising = supportive environment.")
-    rm3.metric("QQQ 1M", f"{mkt.get('qqq_r1m',0)*100:+.1f}%",
+    rm3.metric("QQQ 1M", f"{(mkt.get('qqq_r1m') or 0)*100:+.1f}%" if mkt.get('qqq_r1m') is not None else "N/A",
                help="Nasdaq (QQQ) performance last month. Indicator of tech and growth sector strength.")
-    rm4.metric("10Y Yield", f"{mkt.get('tnx','?')}%",
+    rm4.metric("10Y Yield", f"{mkt.get('tnx')}%" if mkt.get('tnx') is not None else "N/A",
                help="10-year Treasury yield. Rising yields = pressure on growth stocks. Above 4.5% = headwind warning.")
 
     st.divider()
@@ -3625,6 +4405,9 @@ elif page == "🔔 Alerts":
 
     # ── Active alerts ─────────────────────────────────────────────────────
     all_alerts = mod_alerts.load_alerts()
+    # EARNINGS_SEEN entries are internal bookkeeping (one-shot earnings
+    # notifications), not user alerts — exclude from both lists
+    all_alerts = [a for a in all_alerts if a.get("type") != "EARNINGS_SEEN"]
     active     = [a for a in all_alerts if a.get("active")]
     history    = [a for a in all_alerts if not a.get("active")]
 
@@ -4035,16 +4818,23 @@ elif page == "📰 News Feed":
                 except Exception:
                     pass
         prog_nf.empty()
-        # Sort by raw timestamp descending
-        all_news.sort(key=lambda x: x.get("url", ""), reverse=False)
-        # Re-sort by date string (MMM DD format)
+        # Sort by date, newest first. Date strings lack a year ("MMM DD"),
+        # so months after the current month are assumed to be last year.
         try:
             from datetime import datetime as _dt
+            _today_nf = _date.today()
             def _parse_date(n):
-                try:
-                    return _dt.strptime(n.get("date", "Jan 01"), "%b %d")
-                except Exception:
-                    return _dt.min
+                raw = (n.get("date") or "").strip()
+                for fmt in ("%b %d", "%Y-%m-%d", "%b %d, %Y"):
+                    try:
+                        d = _dt.strptime(raw, fmt)
+                        if d.year == 1900:  # year-less format
+                            year = _today_nf.year if d.month <= _today_nf.month else _today_nf.year - 1
+                            d = d.replace(year=year)
+                        return d
+                    except Exception:
+                        continue
+                return _dt.min
             all_news.sort(key=_parse_date, reverse=True)
         except Exception:
             pass
@@ -4389,6 +5179,36 @@ elif page == "🔎 AI Screener":
             st.markdown('<div class="panel-head">REBALANCE TRIGGER</div>', unsafe_allow_html=True)
             st.markdown(f"🔄 {port.get('rebalance_trigger','')}")
 
+        # Keep the built portfolio available across reruns for the Track button
+        st.session_state["_last_built_port"] = port
+
+    # ── Track the last built portfolio (persists across reruns) ───────────────
+    if mode in ("💼 Build Portfolio", "🤖 Agent Mode") and st.session_state.get("_last_built_port"):
+        _lbp = st.session_state["_last_built_port"]
+        st.markdown("---")
+        _tk_c1, _tk_c2, _tk_c3 = st.columns([2, 1.5, 1.5])
+        with _tk_c1:
+            st.markdown(f"**🎯 Put \"{_lbp.get('theme','Portfolio')}\" under tracking?** "
+                        f"Drift, momentum, insider and valuation triggers will monitor it.")
+        with _tk_c2:
+            _tk_capital = st.number_input("Virtual capital ($)", value=100_000, step=10_000,
+                                          key="_tk_capital")
+        with _tk_c3:
+            st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+            if st.button("🎯 Track this portfolio", type="primary", key="_tk_btn"):
+                _tk_data, _tk_err = mod_tp.create_from_positions(
+                    _lbp.get("theme", "AI Portfolio"),
+                    _lbp.get("positions", []),
+                    float(_tk_capital),
+                    thesis=_lbp.get("thesis", ""),
+                    risk_level=_lbp.get("risk_level", ""),
+                )
+                if _tk_err:
+                    st.error(_tk_err)
+                else:
+                    st.success(f"Now tracking \"{_lbp.get('theme','')}\" — open the 🎯 Tracker page.")
+                    st.session_state.pop("_last_built_port", None)
+
     # ════════════════════════════════════════════════════════════════════════
     # SCREEN STOCKS MODE
     # ════════════════════════════════════════════════════════════════════════
@@ -4537,6 +5357,434 @@ elif page == "🔎 AI Screener":
                r["symbol"].upper() in ("QQQ","SPY","IWM","SOXX","SMH","WCLD","ARKK","KWEB","XLK","XLF","XLE","XLV","XLC","XLY","XLI","XLB","XLRE","XLU"):
                 with st.expander(f"📦 ETF Holdings — {r['symbol']}", expanded=False):
                     mod_etf.render_etf_holdings(r["symbol"], max_rows=15)
+
+
+# ─── Page: Tracker (dynamic portfolio monitoring + rebalance engine) ──────────
+elif page == "🎯 Tracker":
+    import html as _h_tp
+    _etp = lambda v: _h_tp.escape(str(v or ""), quote=False)
+
+    st.title("🎯 Portfolio Tracker")
+    st.caption("Dynamic monitoring of tracked portfolios: drift vs target, momentum, insider "
+               "and valuation triggers, cost-aware rebalancing, and a Claude rebalance advisor.")
+
+    _tpdata = mod_tp.load_all()
+    _tp_names = list(_tpdata["portfolios"].keys())
+
+    # ── Manual creation ────────────────────────────────────────────────────────
+    with st.expander("➕ Create tracked portfolio manually", expanded=not _tp_names):
+        st.caption("Enter positions as SYMBOL:WEIGHT pairs, e.g. `NVDA:25, MSFT:20, LLY:20, XOM:15, COST:20`")
+        _mc1, _mc2 = st.columns([3, 1])
+        with _mc1:
+            _man_name  = st.text_input("Portfolio name", key="_tp_man_name",
+                                       placeholder="My Growth Mix")
+            _man_alloc = st.text_input("Allocations", key="_tp_man_alloc",
+                                       placeholder="NVDA:25, MSFT:20, LLY:20, XOM:15, COST:20")
+        with _mc2:
+            _man_cap = st.number_input("Capital ($)", value=100_000, step=10_000, key="_tp_man_cap")
+        if st.button("Create & Track", type="primary", key="_tp_man_btn"):
+            _man_positions = []
+            try:
+                for pair in _man_alloc.split(","):
+                    if ":" in pair:
+                        s, w = pair.split(":")
+                        _man_positions.append({"ticker": s.strip().upper(),
+                                               "weight": float(w.strip())})
+            except Exception:
+                _man_positions = []
+            if not _man_name.strip() or not _man_positions:
+                st.error("Need a name and at least one SYMBOL:WEIGHT pair.")
+            else:
+                _tpdata, _man_err = mod_tp.create_from_positions(
+                    _man_name, _man_positions, float(_man_cap))
+                if _man_err:
+                    st.error(_man_err)
+                else:
+                    st.success(f"Tracking \"{_man_name}\".")
+                    st.rerun()
+
+    if not _tp_names:
+        st.info("No tracked portfolios yet. Create one above, or build one in "
+                "🔎 AI Screener → Build Portfolio and click **🎯 Track this portfolio**.")
+        st.stop()
+
+    # ── Portfolio selector ─────────────────────────────────────────────────────
+    _sel_c1, _sel_c2 = st.columns([4, 1])
+    with _sel_c1:
+        _tp_sel = st.selectbox("Tracked portfolio", _tp_names, key="_tp_selector")
+    with _sel_c2:
+        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+        if st.button("🗑 Delete", key="_tp_del"):
+            _tpdata = mod_tp.delete_portfolio(_tpdata, _tp_sel)
+            st.rerun()
+
+    _tp = _tpdata["portfolios"][_tp_sel]
+    if _tp.get("thesis"):
+        st.caption(f"📜 {_etp(_tp['thesis'])}")
+
+    # ── Settings ───────────────────────────────────────────────────────────────
+    with st.expander("⚙️ Rebalance settings", expanded=False):
+        _s1, _s2, _s3 = st.columns(3)
+        _set = _tp.setdefault("settings", dict(mod_tp.DEFAULT_SETTINGS))
+        with _s1:
+            _new_dth = st.slider("Drift threshold (pp)", 2.0, 15.0,
+                                 float(_set.get("drift_threshold_pct", 5.0)), 0.5,
+                                 help="Rebalance a position only when |current − target| weight exceeds this")
+        with _s2:
+            _new_cbps = st.slider("Transaction cost (bps)", 0, 50,
+                                  int(_set.get("cost_bps", 10)),
+                                  help="One-way cost assumption per trade — commissions + spread")
+        with _s3:
+            _new_mint = st.number_input("Min trade ($)", value=int(_set.get("min_trade_usd", 200)),
+                                        step=100)
+        if (_new_dth, _new_cbps, _new_mint) != (_set.get("drift_threshold_pct"),
+                                                _set.get("cost_bps"), _set.get("min_trade_usd")):
+            _set.update({"drift_threshold_pct": _new_dth, "cost_bps": _new_cbps,
+                         "min_trade_usd": _new_mint})
+            mod_tp.save_all(_tpdata)
+
+    # ── Live analysis (cached in session per day/portfolio) ───────────────────
+    _an_key = f"_tp_analysis_{_tp_sel}"
+    if st.button("🔄 Refresh analysis", key="_tp_refresh") or _an_key not in st.session_state:
+        with st.spinner(f"Analyzing {len(_tp['positions'])} positions (prices, momentum, insiders, health)..."):
+            st.session_state[_an_key] = mod_tp.analyze(_tp)
+        mod_tp.record_snapshot(_tpdata, _tp_sel, st.session_state[_an_key]["total_value"])
+    _an = st.session_state[_an_key]
+
+    # ── Header metrics ─────────────────────────────────────────────────────────
+    _hm1, _hm2, _hm3, _hm4, _hm5 = st.columns(5)
+    _hm1.metric("Total Value", f"${_an['total_value']:,.0f}")
+    _hm2.metric("Return", f"{_an['total_return']:+.2f}%",
+                help=mod_gloss.TIP["alpha"])
+    _hm3.metric("Positions", len(_an["positions"]))
+    _hm4.metric("Fired Triggers", _an["n_triggers"],
+                help=mod_gloss.TIP["drift"])
+    _regime = _an.get("regime", {})
+    _hm5.metric("Market Regime", f"{_regime.get('regime_emoji','')} {_regime.get('regime','N/A')}")
+
+    for _w in _an.get("warnings", []):
+        st.warning(f"⚠ {_w}")
+
+    # ── Positions table ────────────────────────────────────────────────────────
+    st.subheader("Holdings — Target vs Current")
+    _rows_tp = ""
+    for _r in sorted(_an["positions"], key=lambda x: -x["current_weight"]):
+        _dr_c = "#ea3a44" if abs(_r["drift"]) >= _tp["settings"]["drift_threshold_pct"] else \
+                ("#f0b90b" if abs(_r["drift"]) >= _tp["settings"]["drift_threshold_pct"] * 0.6 else "#16c784")
+        _ret_c = "#16c784" if _r["ret_since_entry"] >= 0 else "#ea3a44"
+        _r1m_s = f"{_r['r1m']*100:+.1f}%" if _r["r1m"] is not None else "—"
+        _r1m_c = "#16c784" if (_r["r1m"] or 0) >= 0 else "#ea3a44"
+        _rsi_s = f"{_r['rsi']:.0f}" if _r["rsi"] is not None else "—"
+        _mspr_s = f"{_r['mspr']:+.0f}" if _r["mspr"] is not None else "—"
+        _trig_s = " ".join(_t[0] for _t in _r["triggers"]) or "✓"
+        _stale_s = " ⚠" if _r.get("price_stale") else ""
+        _rows_tp += (
+            f'<tr>'
+            f'<td style="padding:6px 10px;font-weight:700">{_etp(_r["symbol"])}{_stale_s}</td>'
+            f'<td style="padding:6px 10px;color:#8a9bc2;font-size:11px">{_etp(_r["role"])}</td>'
+            f'<td style="padding:6px 10px;text-align:right">{_r["target_weight"]:.1f}%</td>'
+            f'<td style="padding:6px 10px;text-align:right">{_r["current_weight"]:.1f}%</td>'
+            f'<td style="padding:6px 10px;text-align:right;color:{_dr_c};font-weight:600">'
+            f'{_r["drift"]:+.1f}pp</td>'
+            f'<td style="padding:6px 10px;text-align:right;color:{_ret_c}">'
+            f'{_r["ret_since_entry"]:+.1f}%</td>'
+            f'<td style="padding:6px 10px;text-align:right;color:{_r1m_c}">{_r1m_s}</td>'
+            f'<td style="padding:6px 10px;text-align:right">{_rsi_s}</td>'
+            f'<td style="padding:6px 10px;text-align:right">{_mspr_s}</td>'
+            f'<td style="padding:6px 10px;text-align:right">'
+            f'{_r["score"] if _r["score"] is not None else "—"}</td>'
+            f'<td style="padding:6px 10px;font-size:13px">{_trig_s}</td>'
+            f'</tr>'
+        )
+    _th_tp = "text-align:left;font-size:10px;color:#556070;padding:4px 10px;font-family:'IBM Plex Mono',monospace"
+    _tr_tp = "text-align:right;font-size:10px;color:#556070;padding:4px 10px;font-family:'IBM Plex Mono',monospace"
+    st.markdown(
+        f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;'
+        f'padding:12px 16px;overflow-x:auto">'
+        f'<table style="width:100%;border-collapse:collapse">'
+        f'<thead><tr>'
+        f'<th style="{_th_tp}">SYMBOL</th><th style="{_th_tp}">ROLE</th>'
+        f'<th style="{_tr_tp}">TARGET</th><th style="{_tr_tp}">CURRENT</th>'
+        f'<th style="{_tr_tp}">DRIFT</th><th style="{_tr_tp}">SINCE ENTRY</th>'
+        f'<th style="{_tr_tp}">1M</th><th style="{_tr_tp}">RSI</th>'
+        f'<th style="{_tr_tp}">MSPR</th><th style="{_tr_tp}">SCORE</th>'
+        f'<th style="{_th_tp}">TRIGGERS</th>'
+        f'</tr></thead><tbody>{_rows_tp}</tbody></table></div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("Triggers: ⚖️ drift · 📉 momentum crash · 🚀 momentum leader · 🔥 overbought · "
+               "🧊 oversold · 👤 insider activity · 🏥 health · ⚠️ concentration · ✓ none")
+
+    # ── Fired triggers detail ──────────────────────────────────────────────────
+    _fired = [(r["symbol"], t) for r in _an["positions"] for t in r["triggers"]]
+    if _fired:
+        with st.expander(f"🚨 Fired triggers ({len(_fired)})", expanded=True):
+            for _sym_f, (_em, _msg) in _fired:
+                st.markdown(f"{_em} **{_sym_f}** — {_msg}")
+
+    # ── Rebalance plan ─────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("⚖️ Rebalance Plan (cost-aware)")
+    _plan = mod_tp.build_rebalance_plan(_an, _tp)
+    if _plan["actions"]:
+        for _a in _plan["actions"]:
+            _a_c = "#16c784" if _a["action"] == "BUY" else "#ea3a44"
+            st.markdown(
+                f'<span style="color:{_a_c};font-weight:700">{_a["action"]}</span> '
+                f'**{_a["symbol"]}** — ${abs(_a["amount_usd"]):,.0f} '
+                f'<span style="color:#8a9bc2">(drift {_a["drift"]:+.1f}pp)</span>',
+                unsafe_allow_html=True,
+            )
+        _pc1, _pc2, _pc3 = st.columns(3)
+        _pc1.metric("Turnover", f"${_plan['turnover_usd']:,.0f}")
+        _pc2.metric("Est. Cost", f"${_plan['est_cost_usd']:,.2f}")
+        _pc3.metric("Worth It?", "✅ Yes" if _plan["worth_it"] else "❌ Marginal")
+        for _sk in _plan["skipped"]:
+            st.caption(f"⏭ Skipped: {_sk}")
+        if st.button("✅ Apply rebalance (reset to targets)", key="_tp_apply"):
+            _tpdata = mod_tp.apply_rebalance(_tpdata, _tp_sel, _plan["actions"],
+                                             note="Mechanical drift rebalance")
+            st.session_state.pop(_an_key, None)
+            st.success("Rebalanced — share counts reset to target weights at current prices.")
+            st.rerun()
+    else:
+        st.success(f"✓ All positions within ±{_tp['settings']['drift_threshold_pct']:.1f}pp "
+                   f"of target — no mechanical rebalance needed.")
+
+    # ── Claude Rebalance Advisor ───────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🤖 Claude Rebalance Advisor")
+    if st.button("Get full rebalance review", type="primary", key="_tp_claude"):
+        with st.spinner("Claude is weighing momentum, valuation, insiders, regime and costs..."):
+            _fp_tp = mod_tp.portfolio_fingerprint(_tp, _an)
+            _pos_json = json.dumps([{
+                k: v for k, v in r.items()
+                if k in ("symbol", "role", "target_weight", "current_weight", "drift",
+                         "ret_since_entry", "r1m", "r3m", "rsi", "fwd_pe", "mspr",
+                         "score", "score_label", "sector",
+                         "triggers")
+            } for r in _an["positions"]], default=str, indent=1)
+            _regime_s = (f"{_regime.get('regime','?')} (score {_regime.get('score','?')}) — "
+                         f"VIX {_regime.get('signals',{}).get('vix','?')}, "
+                         f"SPY 1M {_regime.get('signals',{}).get('spy_r1m','?')}")
+            _rev = mod_tp.claude_rebalance_review(
+                _fp_tp, _pos_json, json.dumps(_plan, default=str),
+                _regime_s, _tp.get("thesis", ""), " | ".join(_an.get("warnings", [])),
+            )
+        if "error" in _rev:
+            st.error(_rev["error"])
+        else:
+            _urg = _rev.get("urgency", "NONE")
+            _urg_c = {"NONE": "#16c784", "LOW": "#a3e635",
+                      "MEDIUM": "#f0b90b", "HIGH": "#ea3a44"}.get(_urg, "#556070")
+            st.markdown(
+                f'<div style="background:#161b27;border-left:4px solid {_urg_c};'
+                f'border-radius:8px;padding:14px 18px;margin:8px 0">'
+                f'<span style="color:{_urg_c};font-weight:700;font-size:12px">'
+                f'URGENCY: {_etp(_urg)}</span><br>'
+                f'<span style="color:#cdd6f4;font-size:13px">'
+                f'{_etp(_rev.get("overall_assessment",""))}</span></div>',
+                unsafe_allow_html=True,
+            )
+            for _act in _rev.get("actions", []):
+                _ac = {"HOLD": "#8a9bc2", "TRIM": "#f97316", "ADD": "#16c784",
+                       "EXIT": "#ea3a44", "REPLACE": "#a78bfa"}.get(_act.get("action"), "#8a9bc2")
+                _ntw = _act.get("new_target_weight")
+                _ntw_s = f" → new target {_ntw}%" if _ntw is not None else ""
+                _repl = _act.get("replacement_candidate")
+                _repl_s = f" (candidate: **{_repl}**)" if _repl else ""
+                st.markdown(
+                    f'<span style="color:{_ac};font-weight:700">{_etp(_act.get("action",""))}'
+                    f'</span> **{_etp(_act.get("symbol",""))}**{_ntw_s}{_repl_s} — '
+                    f'{_etp(_act.get("reason",""))}',
+                    unsafe_allow_html=True,
+                )
+            _rc1, _rc2 = st.columns(2)
+            with _rc1:
+                if _rev.get("alpha_ideas"):
+                    st.markdown("**💡 Alpha Ideas**")
+                    for _ai in _rev["alpha_ideas"]:
+                        st.markdown(f"- {_ai}")
+            with _rc2:
+                if _rev.get("risk_flags"):
+                    st.markdown("**⚠️ Risk Flags**")
+                    for _rf in _rev["risk_flags"]:
+                        st.markdown(f"- {_rf}")
+            if _rev.get("cost_note"):
+                st.caption(f"💸 {_rev['cost_note']}")
+
+    # ── Value history + rebalance log ──────────────────────────────────────────
+    _vh = _tp.get("value_history", [])
+    if len(_vh) >= 2:
+        st.markdown("---")
+        _vh_df = pd.DataFrame(_vh)
+        _vh_df["date"] = pd.to_datetime(_vh_df["date"])
+        _fig_vh = go.Figure(go.Scatter(
+            x=_vh_df["date"], y=_vh_df["value"], mode="lines+markers",
+            line=dict(color="#4da3ff", width=2), name=_tp_sel,
+        ))
+        _fig_vh.update_layout(
+            title=dict(text="Tracked Value Over Time", font=dict(size=13, color="#cdd6f4"), x=0),
+            height=220, margin=dict(l=0, r=0, t=32, b=0),
+            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+            font=dict(color="#cdd6f4"),
+            yaxis=dict(tickprefix="$", tickformat=",.0f", gridcolor="#1e2535"),
+            xaxis=dict(showgrid=False),
+        )
+        st.plotly_chart(_fig_vh, use_container_width=True, config={"displayModeBar": False})
+
+    if _tp.get("rebalance_log"):
+        with st.expander(f"📜 Rebalance history ({len(_tp['rebalance_log'])})"):
+            for _rl in reversed(_tp["rebalance_log"]):
+                _acts = ", ".join(f"{a['action']} {a['symbol']} ${abs(a['amount_usd']):,.0f}"
+                                  for a in _rl.get("actions", []))
+                st.markdown(f"**{_rl['date']}** — {_acts} · est. cost ${_rl.get('est_cost', 0):,.2f}")
+
+    # ── Risk Parity check (Dalio) ──────────────────────────────────────────────
+    st.markdown("---")
+    with st.expander("⚖️ Risk Parity Check (Dalio) — volatility-balanced weights", expanded=False):
+        st.caption("Simplified risk parity: each position sized inversely to its volatility, "
+                   "so every holding contributes similar RISK (not similar dollars). Compare "
+                   "to your current weights to see where risk is concentrated.")
+        _rp = mod_fm.risk_parity_weights(tuple(sorted(_tp["positions"].keys())))
+        if _rp:
+            _rp_rows = ""
+            for _r in sorted(_an["positions"], key=lambda x: -x["current_weight"]):
+                _sym_rp = _r["symbol"]
+                _rpw = _rp.get(_sym_rp, {})
+                if not _rpw:
+                    continue
+                _gap = _r["current_weight"] - _rpw["rp_weight"]
+                _gap_c = "#ea3a44" if abs(_gap) > 8 else ("#f0b90b" if abs(_gap) > 4 else "#16c784")
+                _rp_rows += (
+                    f'<tr>'
+                    f'<td style="padding:5px 10px;font-weight:600">{_etp(_sym_rp)}</td>'
+                    f'<td style="padding:5px 10px;text-align:right">{_rpw["vol_ann"]:.1f}%</td>'
+                    f'<td style="padding:5px 10px;text-align:right">{_r["current_weight"]:.1f}%</td>'
+                    f'<td style="padding:5px 10px;text-align:right">{_rpw["rp_weight"]:.1f}%</td>'
+                    f'<td style="padding:5px 10px;text-align:right;color:{_gap_c};font-weight:600">'
+                    f'{_gap:+.1f}pp</td>'
+                    f'</tr>'
+                )
+            _th_rp = "text-align:left;font-size:10px;color:#556070;padding:4px 10px;font-family:'IBM Plex Mono',monospace"
+            _tr_rp = "text-align:right;font-size:10px;color:#556070;padding:4px 10px;font-family:'IBM Plex Mono',monospace"
+            st.markdown(
+                f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;'
+                f'padding:12px 16px;overflow-x:auto">'
+                f'<table style="width:100%;border-collapse:collapse"><thead><tr>'
+                f'<th style="{_th_rp}">SYMBOL</th>'
+                f'<th style="{_tr_rp}">ANN. VOL</th>'
+                f'<th style="{_tr_rp}">CURRENT WT</th>'
+                f'<th style="{_tr_rp}">RISK-PARITY WT</th>'
+                f'<th style="{_tr_rp}">GAP</th>'
+                f'</tr></thead><tbody>{_rp_rows}</tbody></table></div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Positive gap = position carries MORE risk than a vol-balanced book "
+                       "would give it. Red = risk concentration >8pp.")
+        else:
+            st.info("Volatility data unavailable for risk parity calculation.")
+
+    # ── Scenario Stress Test ───────────────────────────────────────────────────
+    with st.expander("🧪 Scenario Stress Test — what happens to this portfolio if...", expanded=False):
+        st.caption("Estimated P&L per macro scenario via beta × sector sensitivity. "
+                   "Heuristic, not a forecast — use it to find hidden concentration.")
+        if st.button("Run stress test", key="_tp_stress"):
+            with st.spinner("Stress testing across 5 scenarios..."):
+                _stress_pos = [{"symbol": r["symbol"], "value": r["value"],
+                                "sector": r.get("sector", "")}
+                               for r in _an["positions"]]
+                st.session_state[f"_tp_stress_{_tp_sel}"] = mod_rt.stress_scenarios(_stress_pos)
+        _stress = st.session_state.get(f"_tp_stress_{_tp_sel}")
+        if _stress:
+            for _sc_name, _sc in _stress.items():
+                _sc_c = "#16c784" if _sc["pnl_usd"] >= 0 else "#ea3a44"
+                _worst = _sc.get("worst") or {}
+                _best  = _sc.get("best") or {}
+                st.markdown(
+                    f'<div style="background:#161b27;border-left:3px solid {_sc_c};'
+                    f'border-radius:6px;padding:10px 16px;margin-bottom:8px">'
+                    f'<div style="display:flex;justify-content:space-between">'
+                    f'<b style="color:#e8edf8">{_etp(_sc_name)}</b>'
+                    f'<b style="color:{_sc_c};font-family:IBM Plex Mono,monospace">'
+                    f'{_sc["pnl_pct"]:+.1f}% (${_sc["pnl_usd"]:+,.0f})</b></div>'
+                    f'<div style="font-size:11px;color:#8a9bc2;margin:4px 0">{_etp(_sc["desc"])}</div>'
+                    f'<div style="font-size:11px;color:#556070">'
+                    f'Worst: {_etp(_worst.get("symbol",""))} {_worst.get("impact_pct",0):+.1f}% · '
+                    f'Best: {_etp(_best.get("symbol",""))} {_best.get("impact_pct",0):+.1f}%</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ── Monte Carlo projection ─────────────────────────────────────────────────
+    with st.expander("🎲 Monte Carlo — 1-year projection cone", expanded=False):
+        st.caption("500 simulated paths from the portfolio's own 1y return distribution (GBM). "
+                   "The cone shows the 5th-95th percentile range — plan for the whole cone, "
+                   "not the median.")
+        if st.button("Run simulation", key="_tp_mc"):
+            with st.spinner("Simulating 500 paths..."):
+                _mc_wts = tuple(
+                    (r["symbol"], r["current_weight"] / 100)
+                    for r in _an["positions"] if r["current_weight"] > 0
+                )
+                st.session_state[f"_tp_mc_{_tp_sel}"] = mod_rt.monte_carlo(
+                    _mc_wts, _an["total_value"])
+        _mc = st.session_state.get(f"_tp_mc_{_tp_sel}")
+        if _mc:
+            if _mc.get("error"):
+                st.info(_mc["error"])
+            else:
+                _mc1, _mc2, _mc3, _mc4 = st.columns(4)
+                _mc1.metric("Median (1y)", f"${_mc['median_end']:,.0f}",
+                            help=mod_gloss.TIP["monte_carlo"])
+                _mc2.metric("Bear 5%", f"${_mc['p5_end']:,.0f}")
+                _mc3.metric("Bull 95%", f"${_mc['p95_end']:,.0f}")
+                _mc4.metric("P(loss)", f"{_mc['prob_loss']:.0f}%",
+                            help=mod_gloss.TIP["volatility"])
+                _pcts = _mc["percentiles"]
+                _x_mc = list(range(1, len(_pcts["50"]) + 1))
+                _fig_mc = go.Figure()
+                _fig_mc.add_trace(go.Scatter(x=_x_mc, y=_pcts["95"], mode="lines",
+                                             line=dict(width=0), showlegend=False, hoverinfo="skip"))
+                _fig_mc.add_trace(go.Scatter(x=_x_mc, y=_pcts["5"], mode="lines",
+                                             line=dict(width=0), fill="tonexty",
+                                             fillcolor="rgba(77,163,255,0.10)",
+                                             name="5-95%", hoverinfo="skip"))
+                _fig_mc.add_trace(go.Scatter(x=_x_mc, y=_pcts["75"], mode="lines",
+                                             line=dict(width=0), showlegend=False, hoverinfo="skip"))
+                _fig_mc.add_trace(go.Scatter(x=_x_mc, y=_pcts["25"], mode="lines",
+                                             line=dict(width=0), fill="tonexty",
+                                             fillcolor="rgba(77,163,255,0.18)",
+                                             name="25-75%", hoverinfo="skip"))
+                _fig_mc.add_trace(go.Scatter(x=_x_mc, y=_pcts["50"], mode="lines",
+                                             line=dict(color="#4da3ff", width=2), name="Median"))
+                _fig_mc.add_hline(y=_an["total_value"],
+                                  line=dict(color="#556070", dash="dot", width=1))
+                _fig_mc.update_layout(
+                    height=260, margin=dict(l=0, r=0, t=10, b=0),
+                    plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+                    font=dict(color="#cdd6f4"),
+                    xaxis=dict(title="Trading days ahead", showgrid=False),
+                    yaxis=dict(tickprefix="$", tickformat=",.0f", gridcolor="#1e2535"),
+                    legend=dict(orientation="h", y=1.05, x=0),
+                )
+                st.plotly_chart(_fig_mc, use_container_width=True,
+                                config={"displayModeBar": False})
+                st.caption(f"Annualized portfolio vol: {_mc['ann_vol']}%")
+
+    # ── Excel export ───────────────────────────────────────────────────────────
+    st.markdown("---")
+    try:
+        _xlsx_bytes = mod_xlsx.tracked_portfolio_xlsx(_tp, _an, _plan)
+        st.download_button(
+            "📥 Download Excel report",
+            data=_xlsx_bytes,
+            file_name=f"tracker_{_tp_sel.replace(' ', '_')}_{_date.today().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="_tp_xlsx",
+        )
+    except Exception as _xe:
+        st.caption(f"Excel export unavailable: {_xe}")
 
 
 # ─── Page: Backtester ─────────────────────────────────────────────────────────
@@ -4820,6 +6068,14 @@ elif page == "📝 Paper Portfolio":
 
     st.markdown("---")
 
+    # ── Dividend accrual (auto — credits any ex-dates passed since entry) ──────
+    _new_divs = mod_pp.accrue_dividends(_pp)
+    if _new_divs:
+        mod_pp.save_all(_ppdata)
+        for _dv in _new_divs:
+            st.success(f"💰 Dividend credited: **{_dv['symbol']}** — "
+                       f"${_dv['dps']:.4f}/share × {_dv['shares']} = **${_dv['total']:.2f}**")
+
     # ── Valuation header ───────────────────────────────────────────────────────
     with st.spinner("Fetching live prices..."):
         _val = mod_pp.get_current_value(_pp)
@@ -4918,7 +6174,7 @@ elif page == "📝 Paper Portfolio":
             _ppdata["portfolios"][_active_name] = _updated_pp
             if _comment:
                 _updated_pp.setdefault("claude_journal", []).append({
-                    "date":   str(datetime.date.today()),
+                    "date":   str(_date.today()),
                     "type":   "trade_comment",
                     "symbol": _tr_sym,
                     "action": _tr_action,
@@ -4941,8 +6197,11 @@ elif page == "📝 Paper Portfolio":
         _rows_h = ""
         for _pos in _val["positions"]:
             _sym_v  = _e(_pos["symbol"])
-            _pnl_c  = "#16c784" if _pos["pnl_pct"] >= 0 else "#ea3a44"
-            _pnl_s  = f'+{_pos["pnl_pct"]:.1f}%' if _pos["pnl_pct"] >= 0 else f'{_pos["pnl_pct"]:.1f}%'
+            if _pos.get("price_stale"):
+                _pnl_c, _pnl_s = "#556070", "⚠ stale"
+            else:
+                _pnl_c  = "#16c784" if _pos["pnl_pct"] >= 0 else "#ea3a44"
+                _pnl_s  = f'+{_pos["pnl_pct"]:.1f}%' if _pos["pnl_pct"] >= 0 else f'{_pos["pnl_pct"]:.1f}%'
             try:
                 _scored = mod_phealth.score_position(_pos["symbol"])
                 _lbl    = _e(_scored.get("label", "—"))
@@ -5048,7 +6307,7 @@ elif page == "📝 Paper Portfolio":
 
             # Save to journal
             _pp.setdefault("claude_journal", []).append({
-                "date": str(datetime.date.today()),
+                "date": str(_date.today()),
                 "type": "weekly_review",
                 "text": _review.get("overall_assessment", ""),
                 "grade": _grade,
@@ -5098,19 +6357,31 @@ elif page == "📝 Paper Portfolio":
                         f'</div>',
                         unsafe_allow_html=True,
                     )
+                elif _jtype == "dividend":
+                    st.markdown(
+                        f'<div style="background:#161b27;border-left:3px solid #f0b90b;'
+                        f'border-radius:6px;padding:10px 16px;margin-bottom:8px">'
+                        f'<div style="font-size:11px;color:#556070;margin-bottom:4px">'
+                        f'{_e(_jdate)} · 💰 Dividend · {_e(_jent.get("symbol",""))}</div>'
+                        f'<div style="font-size:13px;color:#cdd6f4">{_e(_jtext)}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
         else:
             st.info("No journal entries yet. Execute trades and get reviews to build your journal.")
 
     # ── Performance ────────────────────────────────────────────────────────────
     with _tab_perf:
         _stats = mod_pp.get_performance_stats(_pp)
-        _pc1, _pc2, _pc3, _pc4, _pc5, _pc6 = st.columns(6)
+        _total_div = mod_pp.total_dividends(_pp)
+        _pc1, _pc2, _pc3, _pc4, _pc5, _pc6, _pc7 = st.columns(7)
         _pc1.metric("Win Rate",     f"{_stats['win_rate']:.0f}%")
         _pc2.metric("Avg Win",      f"{_stats['avg_win']:+.1f}%")
         _pc3.metric("Avg Loss",     f"{_stats['avg_loss']:+.1f}%")
         _pc4.metric("Best Trade",   f"{_stats['best_trade']:+.1f}%")
         _pc5.metric("Worst Trade",  f"{_stats['worst_trade']:+.1f}%")
         _pc6.metric("Realized P&L", f"${_stats['total_realized']:+,.0f}")
+        _pc7.metric("💰 Dividends", f"${_total_div:,.2f}")
 
         if not _eq_curve.empty and len(_eq_curve) >= 2:
             _fig_perf = go.Figure()
@@ -5157,8 +6428,8 @@ elif page == "📝 Paper Portfolio":
                 _cp_pnl_s = f'+{_cp["pnl_pct"]:.1f}%' if _cp["pnl_pct"] >= 0 else f'{_cp["pnl_pct"]:.1f}%'
                 try:
                     _dur = (
-                        datetime.date.fromisoformat(_cp["exit_date"]) -
-                        datetime.date.fromisoformat(_cp["entry_date"])
+                        _date.fromisoformat(_cp["exit_date"]) -
+                        _date.fromisoformat(_cp["entry_date"])
                     ).days
                     _dur_s = f"{_dur}d"
                 except Exception:

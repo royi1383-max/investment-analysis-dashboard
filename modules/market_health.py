@@ -127,18 +127,18 @@ INDICATORS = {
         "format": "pct_raw",
     },
     "gold": {
-        "label": "Gold Price",
+        "label": "Gold vs Trend (MA200)",
         "source": "yf", "ticker": "GC=F",
         "category": "Fear & Sentiment",
-        "desc": "Gold price in USD/oz. Gold rises when investors seek safety, when real rates fall, or when dollar weakens. A macro sentiment barometer.",
+        "desc": "Gold price relative to its own 200-day average. A sharp rally above trend = safe-haven demand spike. Relative measure stays valid as prices drift over the years.",
         "thresholds": [
-            (0,    1800, "yellow", "Below recent range"),
-            (1800, 2200, "yellow", "Neutral range"),
-            (2200, 2600, "yellow", "Elevated — some safe-haven demand"),
-            (2600, 999999,"red",   "High — significant risk-off sentiment"),
+            (-999, -5,  "yellow", "Below trend — weak safe-haven demand"),
+            (-5,   5,   "green",  "In trend — no unusual fear signal"),
+            (5,    12,  "yellow", "Above trend — safe-haven demand building"),
+            (12,   999, "red",    "Sharp spike above trend — significant risk-off sentiment"),
         ],
-        "invest_signal": "Gold rally with falling yields + weak dollar = risk-off environment. Monitor vs equity direction.",
-        "format": "price",
+        "invest_signal": "Gold spiking above its MA200 with falling yields + weak dollar = risk-off environment. Monitor vs equity direction.",
+        "format": "pct_vs_ma",
     },
     "sp500_trend": {
         "label": "S&P 500 — 3M Momentum",
@@ -204,6 +204,13 @@ def _fetch_yf(cfg: dict) -> dict:
                 extra["display_value"] = (latest / ma200 - 1) * 100
         if cfg["label"].startswith("S&P 500 —"):
             extra["display_value"] = r3m
+
+    # Gold is scored relative to its own MA200 (price-drift-proof)
+    if cfg.get("ticker") == "GC=F":
+        ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+        if ma200:
+            extra["ma200"] = ma200
+            extra["display_value"] = (latest / ma200 - 1) * 100
 
     return {"value": latest, **extra}
 

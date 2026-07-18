@@ -28,7 +28,8 @@ def get_price_history(symbol: str, period: str = "2y", interval: str = "1d") -> 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_institutional_holders(symbol: str) -> pd.DataFrame:
     try:
-        return yf.Ticker(symbol).institutional_holders or pd.DataFrame()
+        df = yf.Ticker(symbol).institutional_holders
+        return df if df is not None and not df.empty else pd.DataFrame()
     except Exception as e:
         print(f"[cache] get_institutional_holders({symbol}) failed: {e}", file=sys.stderr)
         return pd.DataFrame()
@@ -37,7 +38,8 @@ def get_institutional_holders(symbol: str) -> pd.DataFrame:
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_insider_transactions(symbol: str) -> pd.DataFrame:
     try:
-        return yf.Ticker(symbol).insider_transactions or pd.DataFrame()
+        df = yf.Ticker(symbol).insider_transactions
+        return df if df is not None and not df.empty else pd.DataFrame()
     except Exception as e:
         print(f"[cache] get_insider_transactions({symbol}) failed: {e}", file=sys.stderr)
         return pd.DataFrame()

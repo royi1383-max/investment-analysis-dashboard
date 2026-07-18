@@ -26,6 +26,26 @@ SCORE_LABELS = {
     (0,   3.5): ("Avoid",       "#d50000"),
 }
 
+# ─── Central Color Palette ────────────────────────────────────────────────────
+# Single source of truth for UI colors. Use in all NEW code; legacy hardcoded
+# hex values are identical and will be migrated incrementally.
+COLORS = {
+    "pos":       "#16c784",   # positive / bullish / green
+    "neg":       "#ea3a44",   # negative / bearish / red
+    "neutral":   "#f0b90b",   # neutral / hold / amber
+    "pos_soft":  "#a3e635",   # mild positive (e.g. "Buy" tier)
+    "warn":      "#f97316",   # warning / trim
+    "muted":     "#556070",   # secondary text / no-data
+    "text":      "#e8edf8",   # primary text
+    "text_soft": "#8a9bc2",   # softer body text
+    "accent":    "#4da3ff",   # links / primary line color
+    "bg_card":   "#161b27",   # card background
+    "bg_panel":  "#1c2333",   # panel background
+    "bg_chart":  "#131722",   # chart paper background
+    "border":    "#2a3348",   # card/panel borders
+    "grid":      "#1e2535",   # chart gridlines
+}
+
 # ─── Expert Investor Profiles ─────────────────────────────────────────────────
 EXPERTS = {
     "Cathie": {

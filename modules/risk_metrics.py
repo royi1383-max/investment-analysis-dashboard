@@ -15,7 +15,7 @@ def _daily_returns(symbol: str) -> pd.Series:
         if ph.empty:
             return pd.Series(dtype=float)
         c = ph["Close"].squeeze()
-        return c.pct_change().dropna()
+        return c.pct_change(fill_method=None).dropna()
     except Exception:
         return pd.Series(dtype=float)
 

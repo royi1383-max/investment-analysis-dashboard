@@ -30,14 +30,10 @@ from utils.cache import get_ticker_info, get_price_history
 # ── Disk path for pick history (alongside the wp cache file in app root) ──────
 _WP_HISTORY_PATH = Path(__file__).parent.parent / ".wp_history.json"
 
-# Module-level client
-_client: anthropic.Anthropic | None = None
+from utils.claude_client import get_client as _get_client
 
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None and ANTHROPIC_API_KEY:
-        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _client
+# Finnhub circuit breaker — module-level, reset at each scan start
+_FH_BREAKER = {"failures": 0}
 from modules import fundamental, technical, momentum as mom_module, scoring
 from modules.finnhub_data  import fetch_all as finnhub_fetch
 from modules.options_flow  import analyze as options_analyze
@@ -74,21 +70,17 @@ def _get_weekly_sample(universe: list[str], n_anchor: int = 30, n_rotating: int 
 
 def _load_pick_history() -> dict[str, int]:
     """Returns {symbol: iso_week_number} of last appearance."""
+    from utils.persist import load_json
+    data = load_json(_WP_HISTORY_PATH, default={})
     try:
-        if _WP_HISTORY_PATH.exists():
-            data = json.loads(_WP_HISTORY_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return {k: int(v) for k, v in data.items()}
+        return {k: int(v) for k, v in data.items()} if isinstance(data, dict) else {}
     except Exception:
-        pass
-    return {}
+        return {}
 
 
 def _save_pick_history(history: dict[str, int]) -> None:
-    try:
-        _WP_HISTORY_PATH.write_text(json.dumps(history, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    from utils.persist import save_json
+    save_json(_WP_HISTORY_PATH, history)
 
 
 def _recency_penalty(symbol: str, history: dict[str, int], current_week: int) -> float:
@@ -165,11 +157,17 @@ def _analyst_data(symbol: str) -> dict:
         "source":          "Yahoo Finance",
     }
 
-    if FINNHUB_API_KEY:
+    # Circuit breaker: after 2 consecutive Finnhub failures (likely rate-limited),
+    # skip Finnhub for the rest of the scan — Yahoo stays the primary source anyway.
+    if FINNHUB_API_KEY and _FH_BREAKER["failures"] < 2:
         try:
             fh  = finnhub_fetch(symbol)
             rec = fh.get("recommendations", {})
             pt  = fh.get("price_target", {})
+            if "rec_error" in fh or "error" in fh:
+                _FH_BREAKER["failures"] += 1
+            else:
+                _FH_BREAKER["failures"] = 0
             fh_total = rec.get("total", 0)
             if fh_total > n_analysts and fh_total > 0:
                 result.update({
@@ -183,7 +181,7 @@ def _analyst_data(symbol: str) -> dict:
                 result["pt_mean"]     = pt["mean"]
                 result["pt_analysts"] = pt.get("analysts", 0)
         except Exception:
-            pass
+            _FH_BREAKER["failures"] += 1
 
     return result
 
@@ -229,12 +227,13 @@ def _momentum_data(symbol: str) -> dict:
         c    = ph["Close"].squeeze() if not ph.empty else pd.Series([])
         vol  = ph["Volume"].squeeze() if not ph.empty else pd.Series([])
 
+        from utils.indicators import rsi_last, trailing_return
         price = info.get("currentPrice") or info.get("regularMarketPrice") or 0
         ma50  = float(c.rolling(50).mean().iloc[-1])  if len(c) >= 50  else None
         ma200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else None
-        r1w   = float(c.iloc[-1] / c.iloc[-5]   - 1) if len(c) >= 6   else None
-        r1m   = float(c.iloc[-1] / c.iloc[-21]  - 1) if len(c) >= 22  else None
-        r3m   = float(c.iloc[-1] / c.iloc[-63]  - 1) if len(c) >= 64  else None
+        r1w   = trailing_return(c, 5)
+        r1m   = trailing_return(c, 21)
+        r3m   = trailing_return(c, 63)
 
         rvol = None
         if len(vol) >= 20:
@@ -242,12 +241,7 @@ def _momentum_data(symbol: str) -> dict:
             avg20 = float(vol.iloc[-20:].mean())
             rvol  = avg5 / avg20 if avg20 > 0 else 1.0
 
-        rsi = None
-        if len(c) >= 15:
-            d = c.diff()
-            g = d.clip(lower=0).rolling(14).mean()
-            l = (-d.clip(upper=0)).rolling(14).mean()
-            rsi = float(100 - 100 / (1 + g / l.replace(0, np.nan)).iloc[-1])
+        rsi = rsi_last(c)
 
         return {
             "price":        price,
@@ -429,10 +423,10 @@ def claude_buy_thesis(stocks: list[dict], regime: dict) -> dict:
 
 CURRENT MARKET CONTEXT:
 - Regime: {regime_name}
-- VIX: {mkt.get('vix','?')} — {"elevated fear" if mkt.get('vix',20)>22 else "calm"}
-- S&P 500: {"above" if mkt.get('spy_above_200') else "below"} MA200, 1M return: {mkt.get('spy_r1m',0)*100:+.1f}%
-- 10Y Yield: {mkt.get('tnx','?')}% {"(rising — headwind for growth)" if mkt.get('tnx_rising') else "(stable)"}
-- Nasdaq (QQQ) 1M: {mkt.get('qqq_r1m',0)*100:+.1f}%
+- VIX: {mkt.get('vix') or 'N/A'} — {"elevated fear" if (mkt.get('vix') or 20)>22 else "calm"}
+- S&P 500: {"above" if mkt.get('spy_above_200') else "below"} MA200, 1M return: {(mkt.get('spy_r1m') or 0)*100:+.1f}%
+- 10Y Yield: {mkt.get('tnx') or 'N/A'}% {"(rising — headwind for growth)" if mkt.get('tnx_rising') else "(stable)"}
+- Nasdaq (QQQ) 1M: {(mkt.get('qqq_r1m') or 0)*100:+.1f}%
 - Today: {datetime.now().strftime('%B %d, %Y')}
 
 QUALIFYING STOCKS (pre-screened, passed all entry conditions):
@@ -469,20 +463,18 @@ Respond ONLY with valid JSON (no markdown fences):
 }}"""
 
     try:
+        from utils.claude_client import extract_json
         msg = _get_client().messages.create(
             model="claude-sonnet-5",
-            max_tokens=4000,
+            max_tokens=8000,   # ~22 stocks × large nested JSON — overshoot to avoid truncation
             thinking={"type": "disabled"},
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = msg.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = "\n".join(raw.split("\n")[1:])
-            if raw.endswith("```"):
-                raw = raw[:-3]
+        raw = extract_json(msg.content[0].text)
         return {t["symbol"]: t for t in json.loads(raw).get("theses", [])}
-    except Exception:
-        return {}
+    except Exception as e:
+        # Surface the failure — UI shows it instead of silently dropping all theses
+        return {"_error": str(e)}
 
 
 # ── Main: run automatic recommendations ───────────────────────────────────────
@@ -504,6 +496,7 @@ def run_recommendations(progress_cb=None) -> dict:
     thresholds  = regime["thresholds"]
     current_week = _current_week_num()
     pick_history = _load_pick_history()
+    _FH_BREAKER["failures"] = 0   # fresh scan — give Finnhub another chance
 
     scan_universe = _get_weekly_sample(WEEKLY_UNIVERSE)
     total         = len(scan_universe)
@@ -595,8 +588,10 @@ def run_recommendations(progress_cb=None) -> dict:
     if progress_cb:
         progress_cb(0.92, f"Claude generating buy theses for {len(qualified)} stocks…")
 
+    thesis_error = None
     if ANTHROPIC_API_KEY and qualified:
         theses = claude_buy_thesis(qualified, regime)
+        thesis_error = theses.get("_error")
         for r in qualified:
             r["thesis"] = theses.get(r["symbol"], {})
     else:
@@ -639,4 +634,5 @@ def run_recommendations(progress_cb=None) -> dict:
         "thresholds":      thresholds,
         "week_num":        current_week,
         "pick_history":    new_history,
+        "thesis_error":    thesis_error,
     }

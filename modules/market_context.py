@@ -24,12 +24,19 @@ def get_regime() -> dict:
     signals = {}
 
     # ── VIX ──────────────────────────────────────────────────────────────────
+    vix_data_ok = True
     try:
         vix_info = get_ticker_info("^VIX")
-        vix = float(vix_info.get("regularMarketPrice") or vix_info.get("currentPrice") or 20)
+        vix_raw = vix_info.get("regularMarketPrice") or vix_info.get("currentPrice")
+        if vix_raw is None:
+            raise ValueError("no VIX price")
+        vix = float(vix_raw)
     except Exception:
+        # Do NOT fabricate a value — use neutral 20 for scoring but flag it
         vix = 20.0
-    signals["vix"] = round(vix, 2)
+        vix_data_ok = False
+    signals["vix"] = round(vix, 2) if vix_data_ok else None
+    signals["vix_data_ok"] = vix_data_ok
 
     # ── S&P 500 trend ─────────────────────────────────────────────────────────
     spy_data_ok = False
@@ -64,9 +71,12 @@ def get_regime() -> dict:
         # Significant yield rise = headwind for growth
         tnx_rising = tnx_now > tnx_1m_ago * 1.04
         tnx_high   = tnx_now > 4.5    # absolute high = extra headwind
-        signals.update({"tnx": round(tnx_now, 2), "tnx_rising": tnx_rising, "tnx_high": tnx_high})
+        signals.update({"tnx": round(tnx_now, 2), "tnx_rising": tnx_rising, "tnx_high": tnx_high,
+                        "tnx_data_ok": True})
     except Exception:
-        signals.update({"tnx": 4.2, "tnx_rising": False, "tnx_high": False})
+        # No fabricated yield — mark unavailable, score treats as neutral
+        signals.update({"tnx": None, "tnx_rising": False, "tnx_high": False,
+                        "tnx_data_ok": False})
 
     # ── Nasdaq (QQQ) momentum ─────────────────────────────────────────────────
     qqq_data_ok = False
@@ -127,12 +137,24 @@ def get_regime() -> dict:
         regime_desc   = "Elevated risk — only highest-quality, strong-momentum setups qualify"
         thresholds = {"fundamental": 6.0, "technical": 5.5, "bull_pct": 62, "r3m_min": 0.03}
 
+    # ── Data-quality warnings (missing feeds are treated as neutral, not real) ─
+    data_warnings = []
+    if not vix_data_ok:
+        data_warnings.append("VIX unavailable — treated as neutral")
+    if not spy_data_ok:
+        data_warnings.append("S&P 500 data unavailable")
+    if not signals.get("tnx_data_ok", True):
+        data_warnings.append("10Y yield unavailable — treated as neutral")
+    if not qqq_data_ok:
+        data_warnings.append("QQQ data unavailable")
+
     return {
-        "regime":       regime,
-        "regime_color": regime_color,
-        "regime_emoji": regime_emoji,
-        "regime_desc":  regime_desc,
-        "score":        s,
-        "thresholds":   thresholds,
-        "signals":      signals,
+        "regime":        regime,
+        "regime_color":  regime_color,
+        "regime_emoji":  regime_emoji,
+        "regime_desc":   regime_desc,
+        "score":         s,
+        "thresholds":    thresholds,
+        "signals":       signals,
+        "data_warnings": data_warnings,
     }

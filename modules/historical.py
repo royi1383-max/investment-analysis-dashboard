@@ -238,4 +238,4 @@ def _compute(t, meta: dict, years: int) -> pd.Series:
 
 
 def _yoy(s: pd.Series) -> pd.Series:
-    return s.pct_change(periods=4)
+    return s.pct_change(periods=4, fill_method=None)

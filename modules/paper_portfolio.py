@@ -52,18 +52,8 @@ _DEFAULT_PORTFOLIOS = [
 ]
 
 
-# ─── JSON encoder for numpy types ─────────────────────────────────────────────
-
-class _Enc(json.JSONEncoder):
-    def default(self, obj: Any) -> Any:
-        if isinstance(obj, (np.integer,)):  return int(obj)
-        if isinstance(obj, (np.floating,)): return float(obj)
-        if isinstance(obj, np.ndarray):     return obj.tolist()
-        return super().default(obj)
-
-
-def _dumps(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, indent=2, cls=_Enc)
+# ─── Persistence via shared util (atomic writes, numpy-safe) ─────────────────
+from utils.persist import load_json as _load_json, save_json as _save_json
 
 
 # ─── Persistence ──────────────────────────────────────────────────────────────
@@ -87,13 +77,9 @@ def _empty_portfolio(name: str, sentiment: str, description: str,
 
 def load_all() -> dict:
     """Load all portfolios from disk. Creates defaults if file absent."""
-    try:
-        if _PP_FILE.exists():
-            data = json.loads(_PP_FILE.read_text(encoding="utf-8"))
-            if "portfolios" in data and data["portfolios"]:
-                return data
-    except Exception:
-        pass
+    data = _load_json(_PP_FILE)
+    if isinstance(data, dict) and data.get("portfolios"):
+        return data
 
     # First run — create defaults
     portfolios = {
@@ -106,10 +92,7 @@ def load_all() -> dict:
 
 
 def save_all(data: dict) -> None:
-    try:
-        _PP_FILE.write_text(_dumps(data), encoding="utf-8")
-    except Exception:
-        pass
+    _save_json(_PP_FILE, data)
 
 
 def get_portfolio(data: dict, name: str) -> dict:
@@ -239,11 +222,17 @@ def get_current_value(pp: dict) -> dict:
     positions = []
 
     for sym, h in pp.get("holdings", {}).items():
+        price_stale = False
         try:
             info  = get_ticker_info(sym)
-            price = float(info.get("currentPrice") or info.get("regularMarketPrice") or h["avg_cost"])
+            raw_price = info.get("currentPrice") or info.get("regularMarketPrice")
+            if raw_price is None:
+                raise ValueError("no price")
+            price = float(raw_price)
         except Exception:
+            # Price feed failed — value at cost but FLAG it so UI doesn't show fake 0% P&L
             price = h["avg_cost"]
+            price_stale = True
 
         val     = price * h["shares"]
         pnl_usd = (price - h["avg_cost"]) * h["shares"]
@@ -251,13 +240,14 @@ def get_current_value(pp: dict) -> dict:
 
         holdings_value += val
         positions.append({
-            "symbol":    sym,
-            "shares":    h["shares"],
-            "avg_cost":  h["avg_cost"],
-            "price":     price,
-            "value":     val,
-            "pnl_usd":   pnl_usd,
-            "pnl_pct":   pnl_pct,
+            "symbol":      sym,
+            "shares":      h["shares"],
+            "avg_cost":    h["avg_cost"],
+            "price":       price,
+            "value":       val,
+            "pnl_usd":     pnl_usd,
+            "pnl_pct":     pnl_pct,
+            "price_stale": price_stale,
         })
 
     total      = pp["cash"] + holdings_value
@@ -308,6 +298,70 @@ def get_closed_pnl(pp: dict) -> list[dict]:
     return pp.get("closed_positions", [])
 
 
+# ─── Dividend accrual ──────────────────────────────────────────────────────────
+
+def accrue_dividends(pp: dict) -> list[dict]:
+    """
+    Credit any dividends whose ex-date passed since each holding was entered
+    and hasn't been credited yet. Mutates pp (cash + dividends_credited +
+    claude_journal). Returns list of newly credited events:
+      [{symbol, ex_date, dps, shares, total}]
+    Caller is responsible for saving.
+    """
+    credited = pp.setdefault("dividends_credited", [])
+    seen = {(d["symbol"], d["ex_date"]) for d in credited}
+    new_events = []
+
+    for sym, h in pp.get("holdings", {}).items():
+        entered = h.get("entered_at")
+        if not entered:
+            continue
+        try:
+            import yfinance as yf
+            divs = yf.Ticker(sym).dividends   # Series indexed by ex-date
+            if divs is None or divs.empty:
+                continue
+            entered_ts = pd.Timestamp(entered)
+            if divs.index.tz is not None:
+                entered_ts = entered_ts.tz_localize(divs.index.tz)
+            today_ts = pd.Timestamp.now(tz=divs.index.tz)
+            for ex_date, dps in divs.items():
+                if ex_date <= entered_ts or ex_date > today_ts:
+                    continue
+                ex_str = ex_date.strftime("%Y-%m-%d")
+                if (sym, ex_str) in seen:
+                    continue
+                total = float(dps) * h["shares"]
+                pp["cash"] += total
+                event = {
+                    "symbol":  sym,
+                    "ex_date": ex_str,
+                    "dps":     round(float(dps), 4),
+                    "shares":  h["shares"],
+                    "total":   round(total, 2),
+                }
+                credited.append(event)
+                seen.add((sym, ex_str))
+                new_events.append(event)
+                pp.setdefault("claude_journal", []).append({
+                    "date":   datetime.date.today().isoformat(),
+                    "type":   "dividend",
+                    "symbol": sym,
+                    "text":   f"Dividend credited: {sym} paid ${dps:.4f}/share × "
+                              f"{h['shares']} shares = ${total:.2f} (ex-date {ex_str})",
+                })
+        except Exception:
+            continue
+
+    if new_events:
+        record_equity_snapshot(pp)
+    return new_events
+
+
+def total_dividends(pp: dict) -> float:
+    return sum(d.get("total", 0) for d in pp.get("dividends_credited", []))
+
+
 # ─── Multi-portfolio comparison ────────────────────────────────────────────────
 
 def compare_portfolios(data: dict) -> pd.DataFrame:
@@ -344,7 +398,7 @@ def _approx_sharpe(curve: pd.DataFrame) -> float:
     try:
         if curve.empty or len(curve) < 2:
             return 0.0
-        ret = curve["total_value"].pct_change().dropna()
+        ret = curve["total_value"].pct_change(fill_method=None).dropna()
         if ret.std() == 0:
             return 0.0
         return float((ret.mean() - 0.05 / 252) / ret.std() * math.sqrt(252))
@@ -376,14 +430,7 @@ def get_performance_stats(pp: dict) -> dict:
 
 # ─── Claude integration ────────────────────────────────────────────────────────
 
-def _get_client():
-    if not ANTHROPIC_API_KEY:
-        return None
-    try:
-        import anthropic
-        return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    except Exception:
-        return None
+from utils.claude_client import get_client as _get_client
 
 
 def claude_trade_comment(symbol: str, action: str, shares: int, price: float,

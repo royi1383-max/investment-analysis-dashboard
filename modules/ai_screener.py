@@ -36,14 +36,7 @@ def _extract_json(raw: str) -> str:
     return raw
 
 
-# Module-level client — created once
-_client: anthropic.Anthropic | None = None
-
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None and ANTHROPIC_API_KEY:
-        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _client
+from utils.claude_client import get_client as _get_client
 
 
 # ── Full scoring (cached per ticker) ─────────────────────────────────────────
@@ -80,19 +73,14 @@ def fetch_stock_data(symbol: str) -> dict | None:
         price_df = get_price_history(symbol, period="1y")
         close    = price_df["Close"].squeeze() if not price_df.empty else pd.Series([])
 
+        from utils.indicators import rsi_last, trailing_return
         ma50  = float(close.rolling(50).mean().iloc[-1])  if len(close) >= 50  else None
         ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
-        r1m   = float(close.iloc[-1] / close.iloc[-21]  - 1) if len(close) >= 22  else None
-        r3m   = float(close.iloc[-1] / close.iloc[-63]  - 1) if len(close) >= 64  else None
-        r6m   = float(close.iloc[-1] / close.iloc[-126] - 1) if len(close) >= 127 else None
+        r1m   = trailing_return(close, 21)
+        r3m   = trailing_return(close, 63)
+        r6m   = trailing_return(close, 126)
 
-        rsi = None
-        if len(close) >= 15:
-            delta = close.diff()
-            gain  = delta.clip(lower=0).rolling(14).mean()
-            loss  = (-delta.clip(upper=0)).rolling(14).mean()
-            rs    = gain / loss.replace(0, np.nan)
-            rsi   = float(100 - 100 / (1 + rs.iloc[-1]))
+        rsi = rsi_last(close)
 
         price   = info.get("currentPrice") or info.get("regularMarketPrice") or 0
         mkt_cap = info.get("marketCap")

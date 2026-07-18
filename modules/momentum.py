@@ -65,7 +65,8 @@ def analyze(symbol: str) -> dict:
     # Sector momentum: compare to QQQ
     df_qqq = get_price_history("QQQ", period="2y")
     qqq_ret_3m = _return(df_qqq, 63)
-    rs_vs_qqq_3m = (returns["3M"] - qqq_ret_3m) if returns["3M"] and qqq_ret_3m else None
+    rs_vs_qqq_3m = (returns["3M"] - qqq_ret_3m) \
+        if returns["3M"] is not None and qqq_ret_3m is not None else None
 
     return {
         "score":        round(momentum_score, 2),

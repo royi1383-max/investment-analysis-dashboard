@@ -74,11 +74,8 @@ def analyze(symbol: str) -> dict:
         rsi_series = ta.rsi(close, length=14)
         rsi = _safe(rsi_series.iloc[-1]) if rsi_series is not None else None
     else:
-        delta = close.diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss.replace(0, np.nan)
-        rsi_series = 100 - (100 / (1 + rs))
+        from utils.indicators import rsi as _rsi_fn
+        rsi_series = _rsi_fn(close)
         rsi = _safe(rsi_series.iloc[-1])
 
     if rsi is not None:
@@ -111,10 +108,9 @@ def analyze(symbol: str) -> dict:
         else:
             macd_val = macd_sig = macd_hist = None
     else:
-        ema12 = close.ewm(span=12).mean()
-        ema26 = close.ewm(span=26).mean()
-        macd_line = ema12 - ema26
-        macd_sig_line = macd_line.ewm(span=9).mean()
+        from utils.indicators import macd as _macd_fn
+        # adjust=True matches this module's original ewm behavior
+        macd_line, macd_sig_line, _hist = _macd_fn(close, adjust=True)
         macd_val  = _safe(macd_line.iloc[-1])
         macd_sig  = _safe(macd_sig_line.iloc[-1])
         macd_hist = (macd_val - macd_sig) if macd_val and macd_sig else None

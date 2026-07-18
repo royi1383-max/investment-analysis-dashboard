@@ -10,14 +10,7 @@ from config import ANTHROPIC_API_KEY
 from utils.cache import get_ticker_info, get_price_history
 from modules import fundamental, technical, momentum as mom_module, scoring
 
-# Module-level client
-_client: anthropic.Anthropic | None = None
-
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None and ANTHROPIC_API_KEY:
-        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _client
+from utils.claude_client import get_client as _get_client
 
 
 SCORE_COLORS = {

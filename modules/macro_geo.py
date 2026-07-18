@@ -10,14 +10,7 @@ import anthropic
 from config import ANTHROPIC_API_KEY
 from utils.cache import get_ticker_info
 
-# Module-level client — instantiated once
-_client: anthropic.Anthropic | None = None
-
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None and ANTHROPIC_API_KEY:
-        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _client
+from utils.claude_client import get_client as _get_client
 
 
 @st.cache_data(ttl=7200, show_spinner=False)

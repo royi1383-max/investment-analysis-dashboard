@@ -39,11 +39,8 @@ def _ema_signals(close: pd.Series, fast: int, slow: int) -> pd.Series:
 
 
 def _rsi_signals(close: pd.Series, period: int, oversold: float, overbought: float) -> pd.Series:
-    delta = close.diff()
-    gain  = delta.clip(lower=0).rolling(period).mean()
-    loss  = (-delta.clip(upper=0)).rolling(period).mean()
-    rs    = gain / loss.replace(0, np.nan)
-    rsi   = 100 - 100 / (1 + rs)
+    from utils.indicators import rsi as _rsi_fn
+    rsi = _rsi_fn(close, period)
     signal = pd.Series(0, index=close.index)
     # Enter long when RSI crosses above oversold; exit when crosses above overbought
     in_position = False
@@ -61,10 +58,8 @@ def _rsi_signals(close: pd.Series, period: int, oversold: float, overbought: flo
 
 
 def _macd_signals(close: pd.Series, fast: int, slow: int, signal_period: int) -> pd.Series:
-    ema_fast   = close.ewm(span=fast,   adjust=False).mean()
-    ema_slow   = close.ewm(span=slow,   adjust=False).mean()
-    macd_line  = ema_fast - ema_slow
-    sig_line   = macd_line.ewm(span=signal_period, adjust=False).mean()
+    from utils.indicators import macd as _macd_fn
+    macd_line, sig_line, _ = _macd_fn(close, fast, slow, signal_period, adjust=False)
     signal = pd.Series(0, index=close.index)
     signal[macd_line > sig_line] = 1
     signal[macd_line < sig_line] = -1
@@ -210,7 +205,7 @@ def run_backtest(
     except Exception as e:
         return error_result(f"Signal generation failed: {e}")
 
-    returns       = close.pct_change().fillna(0)
+    returns       = close.pct_change(fill_method=None).fillna(0)
     strat_returns = raw_signal.shift(1).fillna(0) * returns
     equity_curve  = (1 + strat_returns).cumprod() * capital
     bm_curve      = (1 + returns).cumprod() * capital

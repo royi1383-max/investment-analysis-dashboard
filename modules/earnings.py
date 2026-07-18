@@ -65,7 +65,12 @@ def get_earnings_data(symbol: str) -> dict:
                     result["rev_low"]      = cal.get("Revenue Low")
                 elif hasattr(cal, "columns"):
                     if "Earnings Date" in cal.columns:
-                        future = cal[cal["Earnings Date"] >= pd.Timestamp.now()]
+                        cal = cal.copy()
+                        _ed_col = pd.to_datetime(cal["Earnings Date"])
+                        if _ed_col.dt.tz is not None:
+                            _ed_col = _ed_col.dt.tz_localize(None)
+                        cal["Earnings Date"] = _ed_col
+                        future = cal[_ed_col >= pd.Timestamp.now()]
                         if not future.empty:
                             row0 = future.sort_values("Earnings Date").iloc[0]
                             result["next_earnings"] = pd.Timestamp(row0["Earnings Date"]).date()

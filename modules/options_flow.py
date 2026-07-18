@@ -52,12 +52,14 @@ def analyze(symbol: str) -> dict:
             except Exception:
                 continue
 
-        if total_call_vol + total_put_vol == 0:
+        # Require meaningful two-sided volume — a zero-put (or zero-call) book is
+        # too thin to score; don't fabricate a bullish ratio from it.
+        if total_call_vol + total_put_vol == 0 or total_put_vol == 0 or total_call_vol == 0:
             return _empty()
 
-        cp_vol_ratio = total_call_vol / total_put_vol if total_put_vol > 0 else 2.0
-        cp_oi_ratio  = total_call_oi  / total_put_oi  if total_put_oi  > 0 else 2.0
-        atm_call_pct = atm_call_vol / total_call_vol  if total_call_vol > 0 else 0
+        cp_vol_ratio = total_call_vol / total_put_vol
+        cp_oi_ratio  = total_call_oi / total_put_oi if total_put_oi > 0 else None
+        atm_call_pct = atm_call_vol / total_call_vol
 
         # Score — baseline market has ~0.6-0.9 C/P ratio (hedging bias toward puts)
         if cp_vol_ratio >= 2.5:
@@ -88,7 +90,7 @@ def analyze(symbol: str) -> dict:
             signal += " · ATM calls dominate (targeted bets)"
 
         # OI confirms trend
-        if cp_oi_ratio > cp_vol_ratio:
+        if cp_oi_ratio is not None and cp_oi_ratio > cp_vol_ratio:
             signal += " · OI confirms bullish bias"
 
         return {
@@ -96,7 +98,7 @@ def analyze(symbol: str) -> dict:
             "call_vol":     int(total_call_vol),
             "put_vol":      int(total_put_vol),
             "cp_ratio":     round(cp_vol_ratio, 2),
-            "cp_oi_ratio":  round(cp_oi_ratio, 2),
+            "cp_oi_ratio":  round(cp_oi_ratio, 2) if cp_oi_ratio is not None else None,
             "atm_call_pct": round(atm_call_pct * 100, 1),
             "total_vol":    int(total_call_vol + total_put_vol),
             "signal":       signal,

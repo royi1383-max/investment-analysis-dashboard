@@ -12,14 +12,7 @@ import anthropic
 from config import ANTHROPIC_API_KEY, EXPERTS
 
 
-# Module-level client — instantiated once
-_client: anthropic.Anthropic | None = None
-
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None and ANTHROPIC_API_KEY:
-        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _client
+from utils.claude_client import get_client as _get_client
 
 
 def _empty_result(name: str, profile: dict, price: float, reason: str) -> dict:
@@ -173,3 +166,67 @@ Respond ONLY with a raw JSON object (no markdown, no code fences):
     except Exception as ex:
         return [_empty_result(n, p, price_rounded, f"Error: {ex}")
                 for n, p in EXPERTS.items()]
+
+
+# ─── Panel Synthesis — the moderator distills a final verdict ─────────────────
+
+@st.cache_data(ttl=7200, show_spinner=False)
+def panel_synthesis(symbol: str, price_rounded: float,
+                    experts_json: str, summary_json: str) -> dict:
+    """
+    Second stage: a moderator reads ALL personas' takes plus the live data and
+    produces one distilled verdict + a full position strategy (leverage, hedging,
+    entry/exit plan, add zones, warning signs) + missing perspectives.
+    Cached 2h alongside the panel itself.
+    """
+    from utils.claude_client import extract_json, ENGLISH_ENFORCEMENT
+    client = _get_client()
+    if client is None:
+        return {"error": "No ANTHROPIC_API_KEY configured."}
+    try:
+        prompt = f"""You are the MODERATOR of an investment committee that just heard {symbol} @ ${price_rounded:.2f} debated by multiple investor personas.
+
+THE PANEL'S INDIVIDUAL VERDICTS:
+{experts_json}
+
+LIVE FINANCIAL DATA:
+{summary_json}
+
+Your job — distill the debate into ONE actionable committee decision:
+1. Weigh each persona by how well their style fits THIS stock (a deep-value lens matters less for a hypergrowth name, etc.).
+2. Surface the genuine disagreements — what is the bull case's weakest link, what is the bear case missing.
+3. Identify 1-2 MISSING perspectives the panel lacks for this specific stock (e.g. a semiconductor supply-chain analyst for a chip stock, a biotech regulatory expert for a pharma) and state in one sentence what each would likely add.
+4. Produce a POSITION STRATEGY a practitioner can execute — be specific with numbers and levels derived from the data.
+
+{ENGLISH_ENFORCEMENT}
+Respond ONLY with JSON:
+{{
+  "final_verdict": "<STRONG BUY|BUY|HOLD|WATCH|AVOID|SELL>",
+  "conviction": <1-10>,
+  "one_liner": "<the committee's decision in one sharp sentence>",
+  "weighing_note": "<1-2 sentences: which personas' views got the most weight for THIS stock and why>",
+  "key_debate": "<2-3 sentences: the central bull-vs-bear disagreement and how you resolved it>",
+  "missing_perspectives": [
+    {{"persona": "<who is missing>", "would_add": "<one sentence on their likely input>"}}
+  ],
+  "position_strategy": {{
+    "allocation_pct": <suggested % of a diversified portfolio, 0-15>,
+    "leverage": "<NO|LIGHT|null>", "leverage_note": "<one sentence: why leverage is or is not appropriate here>",
+    "hedging": "<one sentence: whether and HOW to hedge — protective puts / collar / pair trade / none needed>",
+    "entry_plan": "<specific: buy now at market, or tranches at which levels>",
+    "exit_plan": "<specific: stop level or %, trailing rule, profit targets>",
+    "add_zones": "<when/where adding makes sense — level or condition>",
+    "warning_signs": ["<price/volume/fundamental behavior that should worry the holder>", "<...>"],
+    "watch_carefully": ["<events, dates, levels to monitor>", "<...>"]
+  }}
+}}"""
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return json.loads(extract_json(msg.content[0].text))
+    except json.JSONDecodeError as e:
+        return {"error": f"JSON parse error: {e}"}
+    except Exception as e:
+        return {"error": str(e)}

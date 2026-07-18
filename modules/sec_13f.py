@@ -11,7 +11,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import streamlit as st
 
-_HEADERS = {"User-Agent": "InvestmentDashboard research-dashboard@example.com"}
+_HEADERS = {"User-Agent": "InvestmentDashboard royi1383@gmail.com"}
 _NS = "http://www.sec.gov/edgar/document/thirteenf/informationtable"
 
 FAMOUS_FUNDS: dict[str, dict] = {
@@ -30,6 +30,8 @@ FAMOUS_FUNDS: dict[str, dict] = {
 
 
 def _fetch(url: str) -> bytes:
+    # SEC rate limit is 10 req/s — pace every request
+    time.sleep(0.15)
     req = urllib.request.Request(url, headers=_HEADERS)
     with urllib.request.urlopen(req, timeout=15) as r:
         return r.read()
@@ -123,11 +125,10 @@ def _fetch_fund_pair(cik: str) -> tuple[list[dict], list[dict], str, str]:
             return [], [], "", ""
 
         def _load(filing: dict) -> list[dict]:
-            time.sleep(0.12)
+            # pacing handled inside _fetch()
             xml_url = _find_infotable_url(cik_raw, filing["accession"])
             if not xml_url:
                 return []
-            time.sleep(0.12)
             return _parse_holdings(_fetch(xml_url))
 
         latest = _load(filings[0])

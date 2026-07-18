@@ -203,3 +203,62 @@ def _consensus_color(bulls: int, bears: int, total: int) -> str:
     if pct >= 0.40: return "#f0b90b"
     if pct >= 0.25: return "#f97316"
     return "#ea3a44"
+
+
+# ── Earnings Calendar (for automatic earnings-soon alerts) ────────────────────
+
+@st.cache_data(ttl=21600, show_spinner=False)   # 6h — calendar changes rarely
+def get_earnings_calendar(days_ahead: int = 10) -> list[dict]:
+    """Upcoming earnings in the next `days_ahead` days.
+    Returns [{symbol, date, hour, eps_estimate}] — empty list on failure."""
+    c = _client()
+    if not c:
+        return []
+    try:
+        frm = datetime.now().strftime("%Y-%m-%d")
+        to  = (datetime.now() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+        cal = c.earnings_calendar(_from=frm, to=to, symbol="", international=False)
+        out = []
+        for e in cal.get("earningsCalendar", []):
+            out.append({
+                "symbol":       (e.get("symbol") or "").upper(),
+                "date":         e.get("date", ""),
+                "hour":         e.get("hour", ""),        # bmo / amc / dmh
+                "eps_estimate": e.get("epsEstimate"),
+            })
+        return out
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_earnings_for_symbols(symbols: tuple, days_ahead: int = 10) -> list[dict]:
+    """Filter the market-wide earnings calendar to the given symbols."""
+    watch = {s.upper() for s in symbols}
+    return [e for e in get_earnings_calendar(days_ahead) if e["symbol"] in watch]
+
+
+# ── Insider Sentiment (MSPR) ──────────────────────────────────────────────────
+
+@st.cache_data(ttl=43200, show_spinner=False)   # 12h — monthly data
+def get_insider_sentiment(symbol: str) -> list[dict]:
+    """Finnhub insider sentiment (MSPR: -100..100, monthly).
+    Positive MSPR = insiders net buying. Returns last 12 months,
+    [{year, month, mspr, change}] oldest-first — empty list on failure."""
+    c = _client()
+    if not c:
+        return []
+    try:
+        frm = (datetime.now() - timedelta(days=395)).strftime("%Y-%m-%d")
+        to  = datetime.now().strftime("%Y-%m-%d")
+        data = c.stock_insider_sentiment(symbol, frm, to)
+        rows = data.get("data", [])
+        rows.sort(key=lambda r: (r.get("year", 0), r.get("month", 0)))
+        return [{
+            "year":   r.get("year"),
+            "month":  r.get("month"),
+            "mspr":   r.get("mspr"),
+            "change": r.get("change"),
+        } for r in rows[-12:]]
+    except Exception:
+        return []

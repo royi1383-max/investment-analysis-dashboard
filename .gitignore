@@ -12,6 +12,8 @@ __pycache__/
 .wp_history.json
 .paper_portfolios.json
 .alerts.json
+.watchlist.json
+.tracked_portfolios.json
 
 # Local Claude Code settings
 .claude/

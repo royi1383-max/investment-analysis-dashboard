@@ -32,22 +32,13 @@ ALERT_TYPES = {
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def load_alerts() -> list[dict]:
-    try:
-        if not ALERTS_FILE.exists():
-            return []
-        return json.loads(ALERTS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    from utils.persist import load_json
+    return load_json(ALERTS_FILE, default=[])
 
 
 def save_alerts(alerts: list[dict]) -> None:
-    try:
-        ALERTS_FILE.write_text(
-            json.dumps(alerts, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
+    from utils.persist import save_json
+    save_json(ALERTS_FILE, alerts)
 
 
 def add_alert(symbol: str, alert_type: str, threshold: float, note: str = "") -> None:
@@ -83,13 +74,8 @@ def _current_rsi(symbol: str) -> float | None:
         ph = get_price_history(symbol, period="3mo")
         if ph.empty or len(ph) < 15:
             return None
-        c = ph["Close"].squeeze()
-        d = c.diff()
-        g = d.clip(lower=0).rolling(14).mean()
-        l = (-d.clip(upper=0)).rolling(14).mean()
-        rs = g / l.replace(0, np.nan)
-        rsi = float(100 - 100 / (1 + rs.iloc[-1]))
-        return round(rsi, 1)
+        from utils.indicators import rsi_last
+        return rsi_last(ph["Close"].squeeze())
     except Exception:
         return None
 
@@ -151,3 +137,76 @@ def check_alerts() -> list[dict]:
         save_alerts(alerts)
 
     return triggered
+
+
+# ── Automatic earnings-soon notifications ─────────────────────────────────────
+# Scans watchlist + paper-portfolio holdings against the Finnhub earnings
+# calendar. One-shot per (symbol, earnings_date) — remembered in .alerts.json
+# under "seen_earnings" entries so the same report doesn't re-notify.
+
+def _tracked_symbols() -> list[str]:
+    """All symbols the user follows: watchlist + paper portfolio holdings."""
+    syms: set[str] = set()
+    try:
+        from utils.persist import load_json
+        base = Path(__file__).parent.parent
+        wl = load_json(base / ".watchlist.json", default={})
+        for s in (wl.get("symbols") or "").split(","):
+            if s.strip():
+                syms.add(s.strip().upper())
+        pp = load_json(base / ".paper_portfolios.json", default={})
+        for p in (pp.get("portfolios") or {}).values():
+            syms.update(k.upper() for k in (p.get("holdings") or {}).keys())
+    except Exception:
+        pass
+    return sorted(syms)
+
+
+def check_earnings_soon(days_ahead: int = 7) -> list[dict]:
+    """Returns newly-detected upcoming earnings for tracked symbols.
+    Each: {symbol, date, days_until, hour}. Marks them seen so each
+    (symbol, date) notifies once."""
+    try:
+        from modules.finnhub_data import get_earnings_for_symbols
+        syms = _tracked_symbols()
+        if not syms:
+            return []
+        upcoming = get_earnings_for_symbols(tuple(syms), days_ahead)
+        if not upcoming:
+            return []
+
+        alerts = load_alerts()
+        seen = {(a.get("symbol"), a.get("earnings_date"))
+                for a in alerts if a.get("type") == "EARNINGS_SEEN"}
+
+        new_events = []
+        today = datetime.now().date()
+        for e in upcoming:
+            key = (e["symbol"], e["date"])
+            if key in seen or not e["date"]:
+                continue
+            try:
+                days_until = (datetime.strptime(e["date"], "%Y-%m-%d").date() - today).days
+            except Exception:
+                continue
+            if days_until < 0:
+                continue
+            new_events.append({
+                "symbol":     e["symbol"],
+                "date":       e["date"],
+                "days_until": days_until,
+                "hour":       {"bmo": "before open", "amc": "after close"}.get(e.get("hour", ""), ""),
+            })
+            alerts.append({
+                "id":            datetime.now().isoformat() + e["symbol"],
+                "type":          "EARNINGS_SEEN",
+                "symbol":        e["symbol"],
+                "earnings_date": e["date"],
+                "active":        False,
+                "created_at":    datetime.now().strftime("%d/%m/%Y %H:%M"),
+            })
+        if new_events:
+            save_alerts(alerts)
+        return new_events
+    except Exception:
+        return []

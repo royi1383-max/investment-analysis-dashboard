@@ -8,14 +8,7 @@ import streamlit as st
 import anthropic
 from config import ANTHROPIC_API_KEY
 
-_client: anthropic.Anthropic | None = None
-
-
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None and ANTHROPIC_API_KEY:
-        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _client
+from utils.claude_client import get_client as _get_client
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -50,7 +43,7 @@ Respond ONLY with a raw JSON array (no markdown, no code fences):
     try:
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=900,
+            max_tokens=1400,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = msg.content[0].text.strip()

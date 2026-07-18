@@ -32,7 +32,7 @@ def get_seasonality(symbol: str, years: int = 10) -> dict:
             return {}
 
         close = hist["Close"].squeeze()
-        monthly_ret = close.pct_change().dropna()
+        monthly_ret = close.pct_change(fill_method=None).dropna()
 
         monthly: dict = {}
         for m in range(1, 13):

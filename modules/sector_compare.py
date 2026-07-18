@@ -16,20 +16,24 @@ def _get_peers(symbol: str, info: dict) -> list[str]:
         from config import ANTHROPIC_API_KEY
         if not ANTHROPIC_API_KEY:
             return []
-        import anthropic, json as _json
+        import json as _json
+        from utils.claude_client import get_client, extract_json, ENGLISH_ENFORCEMENT
+        client = get_client()
+        if client is None:
+            return []
         name     = info.get("longName", symbol)
         sector   = info.get("sector", "")
         industry = info.get("industry", "")
-        client   = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=80,
             messages=[{"role": "user", "content":
                 f"List 5 US-listed stock ticker symbols that are direct peers of {name} ({symbol}), "
                 f"sector: {sector}, industry: {industry}. "
+                f"{ENGLISH_ENFORCEMENT} "
                 f"Return ONLY a JSON array, e.g. [\"CRM\",\"NOW\",\"SAP\"]. No explanation."}],
         )
-        peers = _json.loads(msg.content[0].text.strip())
+        peers = _json.loads(extract_json(msg.content[0].text))
         if isinstance(peers, list):
             return [p.upper() for p in peers if isinstance(p, str)][:5]
     except Exception:
