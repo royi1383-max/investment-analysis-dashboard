@@ -1084,9 +1084,53 @@ if page == "🔍 Analyze":
                     f'<span style="font-size:10px;color:#556070;text-transform:uppercase;'
                     f'letter-spacing:1px;margin-right:10px">Reversal readiness '
                     f'{_opp["readiness"]}/5</span>{_sig_html}</div>'
-                    f'</div>',
+                    + (
+                        f'<div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e2535">'
+                        f'<span style="font-size:10px;color:#556070;text-transform:uppercase;'
+                        f'letter-spacing:1px;margin-right:10px">Context '
+                        f'({_opp["n_support"]} supportive · {_opp["n_negative"]} negative)</span>'
+                        + "".join(
+                            f'<span style="font-size:11px;margin-right:10px;cursor:help;'
+                            f'color:{"#16c784" if c["stance"] == "supportive" else "#ea3a44" if c["stance"] == "negative" else "#8a9bc2"}" '
+                            f'title="{_html.escape(c["detail"], quote=True)}">'
+                            f'{c["icon"]} {_html.escape(c["label"])}</span>'
+                            for c in _opp["context"]
+                        ) + '</div>'
+                        if _opp.get("context") else ""
+                    )
+                    + f'</div>',
                     unsafe_allow_html=True,
                 )
+
+                # 🤖 Why is it falling? — headline-driven driver classification
+                if _opp.get("drawdown") is not None and _opp["drawdown"] <= -15:
+                    if st.button(f"🤖 Why is {symbol} falling? (AI reads the headlines)",
+                                 key=f"_whyfall_{symbol}"):
+                        with st.spinner("Reading recent headlines..."):
+                            _wf = mod_opp.why_falling(symbol, _opp["drawdown"])
+                        st.session_state[f"_whyfall_res_{symbol}"] = _wf
+                    _wf = st.session_state.get(f"_whyfall_res_{symbol}")
+                    if _wf:
+                        if _wf.get("error"):
+                            st.info(_wf["error"])
+                        else:
+                            _dt_c = {"TRANSIENT": "#16c784", "STRUCTURAL": "#ea3a44",
+                                     "MIXED": "#f0b90b", "UNCLEAR": "#8a9bc2"}.get(
+                                         _wf.get("driver_type", ""), "#8a9bc2")
+                            st.markdown(
+                                f'<div style="background:#161b27;border-left:3px solid {_dt_c};'
+                                f'border-radius:6px;padding:10px 16px;margin-bottom:10px">'
+                                f'<span style="color:{_dt_c};font-weight:700;font-size:12px">'
+                                f'{_html.escape(_wf.get("driver_type", ""))} DECLINE</span>'
+                                f'<div style="font-size:12.5px;color:#cdd6f4;margin-top:4px">'
+                                f'{_html.escape(_wf.get("driver", ""))}</div>'
+                                f'<div style="font-size:12px;color:#8a9bc2;margin-top:4px">'
+                                f'♻️ {_html.escape(_wf.get("recoverable", ""))}</div>'
+                                f'<div style="font-size:12px;color:#f0b90b;margin-top:4px">'
+                                f'👁 Watch: {_html.escape(_wf.get("watch_for", ""))}</div>'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
 
             col_radar, col_kpi = st.columns([1, 1.3])
             with col_radar:
