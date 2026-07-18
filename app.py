@@ -52,6 +52,8 @@ import modules.earnings_quality as mod_eq
 import modules.metric_context   as mod_mctx
 import modules.glossary         as mod_gloss
 import modules.market_valuation as mod_mval
+import modules.score_history    as mod_shist
+import modules.briefing         as mod_brief
 from modules.historical import METRICS_CATALOG
 from config import FINNHUB_API_KEY
 
@@ -734,6 +736,33 @@ with st.sidebar:
                 except Exception as _e:
                     st.markdown(f"❌ **Finnhub** — {str(_e)[:60]}")
 
+    # ── 📰 Morning Briefing ────────────────────────────────────────────────
+    _brief_cached = _load_json(Path(__file__).parent / ".briefing.json", default={})
+    _brief_fresh = _brief_cached.get("date") == _date.today().isoformat()
+    with st.expander("📰 Morning Briefing" + ("" if _brief_fresh else " ·🔴 new day"),
+                     expanded=False):
+        if st.button("☀️ Generate today's briefing" if not _brief_fresh else "🔄 Regenerate",
+                     key="_brief_btn", use_container_width=True):
+            with st.spinner("Collecting overnight changes..."):
+                st.session_state["_briefing"] = mod_brief.get_briefing(force=True)
+        _brief = st.session_state.get("_briefing") or (_brief_cached if _brief_fresh else None)
+        if _brief and _brief.get("summary"):
+            st.markdown(_brief["summary"])
+            _bf = _brief.get("facts", {})
+            _fg_b = _bf.get("fear_greed", {})
+            _meta_bits = []
+            if _bf.get("regime", {}).get("label"):
+                _meta_bits.append(f"Regime {_bf['regime']['label']}")
+            if _fg_b.get("score") is not None:
+                _meta_bits.append(f"F&G {_fg_b['score']}")
+            if _bf.get("cape"):
+                _meta_bits.append(f"CAPE {_bf['cape']:.1f}")
+            if _meta_bits:
+                st.caption(" · ".join(_meta_bits))
+        elif not _brief:
+            st.caption("Your day in 5 bullets: regime, portfolio moves, earnings ahead, "
+                       "score deteriorations. Click to generate.")
+
     # ── 📚 Glossary (educational) ──────────────────────────────────────────
     with st.expander("📚 Glossary", expanded=False):
         _gl_q = st.text_input("Search term", key="_gloss_q",
@@ -864,6 +893,9 @@ if page == "🔍 Analyze":
             relative=p_data["score"],
         )
         st.session_state[f"scores_{symbol}"] = s_data
+        # Record today's score for trend tracking (deterioration-before-price signal)
+        mod_shist.record(symbol, s_data["final"], f_data["score"],
+                         t_data["score"], mo_data["score"])
 
         # Rich detail dict for Expert Panel — actual metric values, not just aggregate scores
         st.session_state[f"details_{symbol}"] = {
@@ -1025,6 +1057,22 @@ if page == "🔍 Analyze":
                     render_radar(s_data["breakdown"], SCORE_WEIGHTS),
                     use_container_width=True,
                 )
+                # Score trend — deterioration/improvement before the price shows it
+                _sdelta = mod_shist.get_delta(symbol, days=30)
+                if _sdelta:
+                    _sd_c = ("#16c784" if _sdelta["delta"] > 0.2 else
+                             "#ea3a44" if _sdelta["delta"] < -0.2 else "#8a9bc2")
+                    _sd_arrow = "▲" if _sdelta["delta"] > 0.2 else "▼" if _sdelta["delta"] < -0.2 else "→"
+                    st.markdown(
+                        f'<div style="font-family:IBM Plex Mono,monospace;font-size:12px;'
+                        f'color:#8a9bc2;cursor:help" title="Composite score tracked each time '
+                        f'you analyze this stock. A sliding score often precedes the price — '
+                        f'the fundamentals/technicals deteriorate before the chart admits it.">'
+                        f'Score trend: {_sdelta["then"]:.1f} ({_sdelta["then_date"]}) '
+                        f'<b style="color:{_sd_c}">{_sd_arrow} {_sdelta["now"]:.1f} '
+                        f'({_sdelta["delta"]:+.1f})</b></div>',
+                        unsafe_allow_html=True,
+                    )
             with col_kpi:
                 st.markdown('<div class="panel-head">KEY METRICS</div>', unsafe_allow_html=True)
                 _m_ov = f_data.get("metrics", {})
@@ -3233,6 +3281,54 @@ if page == "🔍 Analyze":
                         _corr_strip = " · ".join(f"{c['symbol']} {c['corr']:.2f}"
                                                  for c in _fit["corrs"][:8])
                         st.caption(f"Pairwise (6mo daily): {_corr_strip}")
+
+                    # ── What-If: add this stock at X% ────────────────────────
+                    st.markdown("##### 🧪 What-If — add it and see what happens")
+                    _wi_pct = st.slider(f"Add {symbol} at (% of portfolio)", 2, 20, 8, 1,
+                                        key=f"_wi_pct_{symbol}",
+                                        help="Existing positions are scaled down proportionally to make room.")
+                    if st.button("Simulate", key=f"_wi_btn_{symbol}"):
+                        # Equal-weight assumption for paper holdings; tracker uses target weights
+                        _wi_holdings = []
+                        try:
+                            if _fit_choice.startswith("Tracker: "):
+                                _wi_tp = mod_tp.load_all()["portfolios"][_fit_choice[9:]]
+                                _wi_holdings = tuple((s, p["target_weight"] / 100)
+                                                     for s, p in _wi_tp["positions"].items())
+                            else:
+                                _n = len(_fit_syms)
+                                _wi_holdings = tuple((s, 1 / _n) for s in _fit_syms)
+                        except Exception:
+                            pass
+                        if _wi_holdings:
+                            with st.spinner("Simulating portfolio impact..."):
+                                _wi = mod_rt.what_if(_wi_holdings, symbol, float(_wi_pct))
+                            if _wi.get("error"):
+                                st.info(_wi["error"])
+                            else:
+                                _wb, _wa = _wi["before"], _wi["after"]
+                                def _delta_str(b, a, suffix="", invert=False):
+                                    if b is None or a is None:
+                                        return "—"
+                                    d = a - b
+                                    good = (d < 0) if invert else (d > 0)
+                                    c = "#16c784" if good else ("#ea3a44" if d != 0 else "#8a9bc2")
+                                    return (f'{b}{suffix} → <b style="color:{c}">{a}{suffix} '
+                                            f'({d:+.2f})</b>')
+                                st.markdown(
+                                    f'<div style="background:#161b27;border:1px solid #2a3348;'
+                                    f'border-radius:8px;padding:12px 16px;font-size:13px;'
+                                    f'color:#cdd6f4;line-height:2">'
+                                    f'Beta: {_delta_str(_wb["beta"], _wa["beta"], invert=True)}<br>'
+                                    f'Annual Vol: {_delta_str(_wb["vol"], _wa["vol"], "%", invert=True)}<br>'
+                                    f'Avg Correlation: {_delta_str(_wb["avg_corr"], _wa["avg_corr"], invert=True)}<br>'
+                                    f'Top Sector: {_html.escape(_wb["top_sector"])} {_wb["top_sector_pct"]}% → '
+                                    f'{_html.escape(_wa["top_sector"])} {_wa["top_sector_pct"]}%'
+                                    f'</div>',
+                                    unsafe_allow_html=True,
+                                )
+                                st.caption("Green = diversification improved (lower beta/vol/correlation). "
+                                           "Watch the top-sector line — adding a duplicate concentrates it.")
 
             # ── 3. Earnings Quality ──────────────────────────────────────────
             st.markdown("---")

@@ -278,3 +278,93 @@ def monte_carlo(symbols_weights: tuple, start_value: float,
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+# ─── What-If simulator ────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def what_if(holdings: tuple, candidate: str, add_pct: float) -> dict:
+    """
+    Portfolio impact of adding `candidate` at `add_pct`% (existing scaled down
+    proportionally). holdings: ((sym, weight_frac), ...).
+    Returns before/after: beta, ann_vol, avg_corr, top_sector share.
+    """
+    try:
+        import pandas as pd
+
+        def _rets(sym):
+            ph = get_price_history(sym, period="6mo")
+            if ph.empty:
+                return None
+            return ph["Close"].squeeze().pct_change(fill_method=None).dropna()
+
+        spy = _rets("SPY")
+        if spy is None:
+            return {"error": "SPY data unavailable"}
+
+        rets = {}
+        sectors = {}
+        for sym, _w in holdings:
+            r = _rets(sym)
+            if r is not None:
+                rets[sym] = r
+                try:
+                    sectors[sym] = get_ticker_info(sym).get("sector") or "Unknown"
+                except Exception:
+                    sectors[sym] = "Unknown"
+        cand_r = _rets(candidate)
+        if cand_r is None:
+            return {"error": f"No data for {candidate}"}
+        try:
+            cand_sector = get_ticker_info(candidate).get("sector") or "Unknown"
+        except Exception:
+            cand_sector = "Unknown"
+        if not rets:
+            return {"error": "No holdings data"}
+
+        def _stats(weight_map, extra=None):
+            frames = {s: rets[s] for s in weight_map if s in rets}
+            if extra is not None:
+                frames[candidate] = cand_r
+            df = pd.DataFrame(frames).dropna()
+            if len(df) < 40:
+                return None
+            w = pd.Series({s: weight_map.get(s, 0) for s in df.columns})
+            if extra is not None:
+                w[candidate] = extra
+            w = w / w.sum()
+            port = (df * w).sum(axis=1)
+            joined = pd.concat([port, spy], axis=1, join="inner").dropna()
+            beta = (float(joined.iloc[:, 0].cov(joined.iloc[:, 1]) /
+                          joined.iloc[:, 1].var())
+                    if joined.iloc[:, 1].var() > 0 else None)
+            vol = float(port.std() * (252 ** 0.5) * 100)
+            corr_m = df.corr()
+            n = len(df.columns)
+            avg_corr = (float((corr_m.sum().sum() - n) / (n * n - n))
+                        if n > 1 else None)
+            # sector shares
+            sec_w = {}
+            sec_map = dict(sectors)
+            if extra is not None:
+                sec_map[candidate] = cand_sector
+            for s in df.columns:
+                sec = sec_map.get(s, "Unknown")
+                sec_w[sec] = sec_w.get(sec, 0) + float(w[s])
+            top_sec = max(sec_w.items(), key=lambda kv: kv[1]) if sec_w else ("", 0)
+            return {"beta": round(beta, 2) if beta is not None else None,
+                    "vol": round(vol, 1),
+                    "avg_corr": round(avg_corr, 2) if avg_corr is not None else None,
+                    "top_sector": top_sec[0], "top_sector_pct": round(top_sec[1] * 100, 1)}
+
+        base_w = {s: w for s, w in holdings}
+        before = _stats(base_w)
+        f = add_pct / 100
+        scaled = {s: w * (1 - f) for s, w in holdings}
+        after = _stats(scaled, extra=f)
+        if before is None or after is None:
+            return {"error": "Insufficient overlapping history"}
+        return {"before": before, "after": after,
+                "cand_sector": cand_sector, "error": None}
+    except Exception as e:
+        return {"error": str(e)}
