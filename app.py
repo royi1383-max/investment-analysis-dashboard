@@ -55,6 +55,7 @@ import modules.market_valuation as mod_mval
 import modules.score_history    as mod_shist
 import modules.briefing         as mod_brief
 import modules.opportunity      as mod_opp
+import modules.alpha_vantage    as mod_av
 from modules.historical import METRICS_CATALOG
 from config import FINNHUB_API_KEY
 
@@ -1131,6 +1132,52 @@ if page == "🔍 Analyze":
                                 f'</div>',
                                 unsafe_allow_html=True,
                             )
+
+            # ── 📡 AV News Sentiment (real NLP scores; on-demand — 25 req/day) ──
+            from config import ALPHA_VANTAGE_API_KEY as _av_key
+            if _av_key:
+                _av_state = st.session_state.get(f"_av_sent_{symbol}")
+                if _av_state is None:
+                    if st.button("📡 Load news sentiment (Alpha Vantage NLP)",
+                                 key=f"_av_btn_{symbol}",
+                                 help="Real per-article sentiment scores from Alpha Vantage's NLP "
+                                      "engine — one request per symbol per day (cached 24h). "
+                                      "Free tier budget: 25 symbols/day."):
+                        with st.spinner("Scoring recent news..."):
+                            st.session_state[f"_av_sent_{symbol}"] = mod_av.news_sentiment(symbol)
+                        st.rerun()
+                else:
+                    _av = _av_state
+                    if _av.get("error"):
+                        st.caption(f"📡 News sentiment unavailable: {_av['error']}")
+                    else:
+                        _av_d = _av["dist"]
+                        _av_tops = "".join(
+                            f'<div style="font-size:11px;color:#8a9bc2;padding:1px 0;'
+                            f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
+                            f'<b style="color:{"#16c784" if t["score"] >= 0.15 else "#ea3a44" if t["score"] <= -0.15 else "#f0b90b"}">'
+                            f'{t["score"]:+.2f}</b> {_html.escape(t["title"][:85])}</div>'
+                            for t in _av["top"][:3]
+                        )
+                        st.markdown(
+                            f'<div style="background:#161b27;border:1px solid #2a3348;'
+                            f'border-left:4px solid {_av["color"]};border-radius:8px;'
+                            f'padding:12px 18px;margin-bottom:14px">'
+                            f'<div style="display:flex;justify-content:space-between;'
+                            f'align-items:center;flex-wrap:wrap;gap:8px">'
+                            f'<span style="font-weight:700;color:#e8edf8">📡 News Sentiment '
+                            f'<span style="color:{_av["color"]}">{_av["label"]}</span> '
+                            f'<span style="font-family:IBM Plex Mono,monospace;font-size:13px">'
+                            f'({_av["avg_score"]:+.2f})</span></span>'
+                            f'<span style="font-size:11px;color:#8a9bc2">'
+                            f'{_av["n_articles"]} scored articles · '
+                            f'<span style="color:#16c784">{_av_d["bullish"]}↑</span> '
+                            f'<span style="color:#f0b90b">{_av_d["neutral"]}→</span> '
+                            f'<span style="color:#ea3a44">{_av_d["bearish"]}↓</span> · '
+                            f'Alpha Vantage NLP</span></div>'
+                            f'{_av_tops}</div>',
+                            unsafe_allow_html=True,
+                        )
 
             col_radar, col_kpi = st.columns([1, 1.3])
             with col_radar:

@@ -7,6 +7,7 @@ load_dotenv()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 FRED_API_KEY      = os.getenv("FRED_API_KEY", "")       # free at fred.stlouisfed.org
 FINNHUB_API_KEY   = os.getenv("FINNHUB_API_KEY", "")    # free at finnhub.io
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "")  # free at alphavantage.co (25 req/day)
 
 # ─── Scoring Weights ─────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
