@@ -56,6 +56,7 @@ import modules.score_history    as mod_shist
 import modules.briefing         as mod_brief
 import modules.opportunity      as mod_opp
 import modules.alpha_vantage    as mod_av
+import modules.fmp              as mod_fmp
 from modules.historical import METRICS_CATALOG
 from config import FINNHUB_API_KEY
 
@@ -2093,6 +2094,55 @@ if page == "🔍 Analyze":
                 else:
                     st.info("No insider sentiment data available for this stock.")
 
+            # ── Analyst Rating Actions (FMP) ────────────────────────────────
+            from config import FMP_API_KEY as _fmp_key
+            if _fmp_key:
+                st.markdown("---")
+                st.subheader("Analyst Rating Actions (90 days)", help=mod_gloss.tip("analyst_grades"))
+                st.caption(
+                    "Upgrade/downgrade momentum — not just where ratings stand, but which "
+                    "direction they're MOVING. A cluster of upgrades often front-runs price "
+                    "action; a cluster of downgrades often confirms weakness before it's obvious. "
+                    "Source: Financial Modeling Prep."
+                )
+                _grades = mod_fmp.analyst_grades(symbol)
+                if _grades.get("error"):
+                    st.info(f"Rating actions unavailable: {_grades['error']}")
+                else:
+                    _gg1, _gg2, _gg3 = st.columns(3)
+                    _gg1.metric("Upgrades (90d)", _grades["up_90d"])
+                    _gg2.metric("Downgrades (90d)", _grades["down_90d"])
+                    _gg3.metric("New Coverage (90d)", _grades["init_90d"])
+                    st.markdown(
+                        f'<div style="color:{_grades["color"]};font-weight:600;'
+                        f'font-size:13px;margin:6px 0 10px 0">{_html.escape(_grades["verdict"])}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if _grades["recent"]:
+                        _ga_rows = ""
+                        _ga_colors = {"upgrade": "#16c784", "downgrade": "#ea3a44",
+                                     "initiate": "#4da3ff", "initiated coverage": "#4da3ff",
+                                     "maintain": "#556070"}
+                        for r in _grades["recent"][:10]:
+                            _ac = _ga_colors.get(r["action"], "#8a9bc2")
+                            _ga_rows += (
+                                f'<tr>'
+                                f'<td style="padding:5px 10px;color:#8a9bc2">{_html.escape(r["date"])}</td>'
+                                f'<td style="padding:5px 10px;font-weight:600">{_html.escape(r["firm"])}</td>'
+                                f'<td style="padding:5px 10px;color:{_ac};text-transform:uppercase;'
+                                f'font-size:11px;font-weight:700">{_html.escape(r["action"])}</td>'
+                                f'<td style="padding:5px 10px;color:#8a9bc2">'
+                                f'{_html.escape(r["from"])} → {_html.escape(r["to"])}</td>'
+                                f'</tr>'
+                            )
+                        st.markdown(
+                            f'<div style="background:#161b27;border:1px solid #2a3348;'
+                            f'border-radius:8px;padding:10px 14px;overflow-x:auto">'
+                            f'<table style="width:100%;border-collapse:collapse;font-size:12px">'
+                            f'<tbody>{_ga_rows}</tbody></table></div>',
+                            unsafe_allow_html=True,
+                        )
+
             # Analysts & News
             st.markdown("---")
             if not FINNHUB_API_KEY:
@@ -3579,6 +3629,56 @@ elif page == "🌍 Market Radar":
                                "Deep-dive candidates → Analyze → Institutional tab.")
                 else:
                     st.info("No meaningful insider accumulation found in the scanned universe right now.")
+
+    # ── 🏛 Congress Trading feed (FMP) ────────────────────────────────────────
+    with st.expander("🏛 Congress Trading — recent Senate disclosures", expanded=False):
+        from config import FMP_API_KEY as _fmp_key_radar
+        if not _fmp_key_radar:
+            st.warning("Add FMP_API_KEY to enable the Congress trading feed.")
+        else:
+            st.caption(mod_gloss.tip("congress_trading"))
+            st.caption(
+                "Free tier exposes only the 25 MOST RECENT disclosures market-wide (no "
+                "per-symbol lookup, no deep history) — treat this as a rolling snapshot of "
+                "what Congress just filed, not a comprehensive scanner. Disclosures lag the "
+                "actual trade by up to 45 days by law."
+            )
+            _sen_feed = mod_fmp.senate_latest()
+            if not _sen_feed:
+                st.info("No data returned — check the API key or try again shortly.")
+            else:
+                _sen_clusters = mod_fmp.senate_cluster_summary(_sen_feed)
+                if _sen_clusters:
+                    st.markdown("**Multiple senators active on the same symbol:**")
+                    for c in _sen_clusters[:5]:
+                        st.markdown(f"- **{c['symbol']}** — {c['senators']} senators, "
+                                   f"{c['buys']} buys / {c['sells']} sells, latest {c['latest']}")
+                    st.markdown("---")
+
+                _sen_rows_html = ""
+                for r in _sen_feed:
+                    _sc = "#16c784" if "purchase" in r["type"].lower() else \
+                          "#ea3a44" if "sale" in r["type"].lower() else "#f0b90b"
+                    _sen_rows_html += (
+                        f'<tr>'
+                        f'<td style="padding:5px 10px;color:#8a9bc2">{r["tx_date"]}</td>'
+                        f'<td style="padding:5px 10px;font-weight:700">{r["symbol"] or "—"}</td>'
+                        f'<td style="padding:5px 10px">{_html.escape(r["name"])}</td>'
+                        f'<td style="padding:5px 10px;color:{_sc};font-weight:600">{_html.escape(r["type"])}</td>'
+                        f'<td style="padding:5px 10px;color:#8a9bc2;font-size:11px">{_html.escape(r["amount"])}</td>'
+                        f'</tr>'
+                    )
+                _th_sen = "text-align:left;font-size:10px;color:#556070;padding:4px 10px;font-family:'IBM Plex Mono',monospace"
+                st.markdown(
+                    f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;'
+                    f'padding:12px 16px;overflow-x:auto">'
+                    f'<table style="width:100%;border-collapse:collapse"><thead><tr>'
+                    f'<th style="{_th_sen}">TX DATE</th><th style="{_th_sen}">SYMBOL</th>'
+                    f'<th style="{_th_sen}">SENATOR</th><th style="{_th_sen}">TYPE</th>'
+                    f'<th style="{_th_sen}">AMOUNT</th>'
+                    f'</tr></thead><tbody>{_sen_rows_html}</tbody></table></div>',
+                    unsafe_allow_html=True,
+                )
 
     if st.button("🔄 Scan Market Now", type="primary"):
         rows = []
