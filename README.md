@@ -15,6 +15,24 @@ A growth-focused stock & ETF research tool built with Python and Streamlit. Comb
 - **Portfolio tools** — paper portfolio simulation, portfolio health checks, price alerts, backtesting
 - **Weekly picks** — a recurring screen for candidate ideas
 
+## Screenshots
+
+Captured from a fresh install with no personal data (free FRED and Finnhub keys; the AI features
+that need an Anthropic key are not shown).
+
+**Analyze: ticker autocomplete, "What's hot right now" suggestions, and the full stock verdict**
+
+![Analyze page with hot ticker suggestions](docs/screenshots/analyze-hot-tickers.png)
+![Deep analysis of a single stock](docs/screenshots/analyze-stock.png)
+
+**Market Health: valuation, sentiment and macro indicators blended into one score**
+
+![Market Health dashboard](docs/screenshots/market-health.png)
+
+**Sector Rotation: relative strength of sectors and themes vs the S&P 500**
+
+![Sector Rotation monitor](docs/screenshots/sector-rotation.png)
+
 ## Tech stack
 
 Python, Streamlit, pandas, numpy, plotly, yfinance, Finnhub, FRED API, Anthropic API
