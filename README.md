@@ -42,6 +42,10 @@ Python, Streamlit, pandas, numpy, plotly, yfinance, Finnhub, FRED API, Anthropic
 **Requirements:** Python 3.12 or newer (developed and tested on 3.14) and Streamlit 1.66.x
 (pinned in `requirements.txt` to the tested range so a future release cannot break the app).
 
+**Get the code:** `git clone https://github.com/royi1383-max/investment-analysis-dashboard.git`
+(or **Code → Download ZIP** on GitHub). A step-by-step guide for non-developers is in
+[SETUP_FOR_FRIEND.md](SETUP_FOR_FRIEND.md).
+
 **Windows (easiest):** double-click `setup_and_run.bat`. It creates a private Python
 environment in `%LOCALAPPDATA%\InvestmentDashboard\venv` (your system Python is not
 touched), installs the packages, and opens the dashboard in your browser.

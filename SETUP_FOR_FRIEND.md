@@ -7,6 +7,18 @@ Nothing is uploaded anywhere; your API keys stay in a local file.
 
 ## One-time setup (~10 minutes)
 
+### 0. Get the code
+
+Either clone it (needs [Git](https://git-scm.com)):
+
+```
+git clone https://github.com/royi1383-max/investment-analysis-dashboard.git
+```
+
+or on the GitHub page click **Code → Download ZIP** and extract it. Put the folder
+somewhere with a **short path** (for example `C:\InvestmentDashboard`): a very long path can
+make the package install fail on Windows.
+
 ### 1. Install Python
 Get Python 3.12 or newer (Windows): https://python.org
 
@@ -46,6 +58,9 @@ Paste each key after the `=` with no quotes and no spaces:
 ```
 ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxx
 ```
+
+Also set `SEC_CONTACT_EMAIL=` to **your own email address** (used only in the request header
+sent to sec.gov by the 13F tracker). Keys you don't have can stay as they are.
 
 Save, close Notepad, press any key in the black window.
 
