@@ -44,7 +44,7 @@ Python, Streamlit, pandas, numpy, plotly, yfinance, Finnhub, FRED API, Anthropic
 
 **Get the code:** `git clone https://github.com/royi1383-max/investment-analysis-dashboard.git`
 (or **Code → Download ZIP** on GitHub). A step-by-step guide for non-developers is in
-[SETUP_FOR_FRIEND.md](SETUP_FOR_FRIEND.md).
+[SETUP.md](SETUP.md).
 
 **Windows (easiest):** double-click `setup_and_run.bat`. It creates a private Python
 environment in `%LOCALAPPDATA%\InvestmentDashboard\venv` (your system Python is not
