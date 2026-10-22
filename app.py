@@ -15,7 +15,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 from config import SCORE_LABELS, SCORE_WEIGHTS, RADAR_TICKERS, SECTOR_ETFS, ANTHROPIC_API_KEY, WEEKLY_UNIVERSE
-from utils.cache import get_ticker_info, get_price_history, parallel_map
+from utils.cache import get_ticker_info, get_price_history, parallel_map, search_tickers
 import utils.indicators as mod_ind
 import modules.fundamental  as mod_fund
 import modules.technical    as mod_tech
@@ -868,11 +868,27 @@ if page == "🔍 Analyze":
 
     col_input, col_btn = st.columns([4, 1])
     with col_input:
-        symbol = st.text_input(
-            "Enter ticker", value=st.session_state.get("symbol", ""),
-            placeholder="e.g. NVDA, AAPL, QQQ, KWEB...",
+        # Typing filters the known tickers; any other ticker can still be typed and confirmed with Enter.
+        _known = sorted({*WEEKLY_UNIVERSE, *RADAR_TICKERS, *SECTOR_ETFS.values()})
+        _cur = st.session_state.get("symbol", "")
+        _opts = _known if (not _cur or _cur in _known) else [_cur] + _known
+        symbol = (st.selectbox(
+            "Enter ticker", _opts,
+            index=_opts.index(_cur) if _cur in _opts else None,
+            accept_new_options=True,
+            placeholder="Type a ticker (NVDA, AAPL, QQQ...) — suggestions appear as you type",
             label_visibility="collapsed",
-        ).upper().strip()
+        ) or "").upper().strip()
+        with st.expander("Don't know the ticker? Search by company name"):
+            _q = st.text_input("Company name", key="_az_name_q", placeholder="e.g. nvidia, palantir, semiconductor")
+            if _q.strip():
+                _hits = search_tickers(_q.strip())
+                if not _hits:
+                    st.caption("No matches.")
+                for _h in _hits:
+                    if st.button(f'{_h["symbol"]} — {_h["name"]}', key=f'_az_hit_{_h["symbol"]}'):
+                        st.session_state["symbol"] = _h["symbol"]
+                        st.rerun()
     with col_btn:
         run = st.button("Analyze →", type="primary", width="stretch")
 

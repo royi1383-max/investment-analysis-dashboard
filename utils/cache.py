@@ -27,6 +27,20 @@ def parallel_map(fn, items, max_workers: int = 8) -> list:
         return list(pool.map(_run, list(items)))
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_tickers(query: str, limit: int = 8) -> list[dict]:
+    """Find tickers by company name or partial symbol (Yahoo Finance search, no API key)."""
+    try:
+        quotes = yf.Search(query, max_results=limit).quotes
+    except Exception as e:
+        print(f"[cache] search_tickers({query}) failed: {e}", file=sys.stderr)
+        return []
+    return [
+        {"symbol": q["symbol"], "name": q.get("shortname") or q.get("longname") or ""}
+        for q in quotes if q.get("symbol")
+    ]
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def get_ticker_info(symbol: str) -> dict:
     try:
