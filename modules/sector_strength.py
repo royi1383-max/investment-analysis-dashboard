@@ -509,6 +509,10 @@ def get_sector_rotation() -> list[dict]:
     except Exception:
         _sc, _spy_r3m = None, 0.0
 
+    # Warm the price cache for every ETF in parallel; the loop below then hits the cache.
+    from utils.cache import parallel_map
+    parallel_map(lambda e: get_price_history(e, period="1y"), [e for _, e, _ in _ROTATION_SECTORS])
+
     results = []
     for label, etf, category in _ROTATION_SECTORS:
         s = _etf_strength(etf)

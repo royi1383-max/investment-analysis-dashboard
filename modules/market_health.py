@@ -8,6 +8,7 @@ import requests
 import streamlit as st
 from config import FRED_API_KEY, ANTHROPIC_API_KEY
 from utils.claude_client import get_client as _get_client
+from utils.cache import parallel_map
 
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 
@@ -200,15 +201,22 @@ WEIGHTS = {
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_all() -> dict:
-    results = {}
-    for key, cfg in INDICATORS.items():
+    def _one(item):
+        key, cfg = item
         try:
             if cfg["source"] == "yf":
-                results[key] = _fetch_yf(cfg)
-            elif cfg["source"] == "fred":
-                results[key] = _fetch_fred(cfg)
+                return key, _fetch_yf(cfg)
+            if cfg["source"] == "fred":
+                return key, _fetch_fred(cfg)
         except Exception as e:
-            results[key] = {"value": None, "error": str(e)}
+            return key, {"value": None, "error": str(e)}
+        return key, None
+
+    results = {}
+    for out in parallel_map(_one, INDICATORS.items()):
+        if isinstance(out, Exception) or out[1] is None:
+            continue
+        results[out[0]] = out[1]
     return results
 
 

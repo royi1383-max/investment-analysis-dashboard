@@ -1,7 +1,30 @@
 import sys
+from concurrent.futures import ThreadPoolExecutor
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+
+
+def parallel_map(fn, items, max_workers: int = 8) -> list:
+    """Run fn(item) for every item on a thread pool; results keep input order.
+
+    Network-bound fetches (yfinance, FRED) spend their time waiting, so running them
+    side by side cuts page load time. An item whose fn raises yields the exception
+    object instead of aborting the whole batch.
+    """
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+    ctx = get_script_run_ctx()
+
+    def _run(item):
+        if ctx is not None:
+            add_script_run_ctx(None, ctx)  # let cached functions work inside the worker thread
+        try:
+            return fn(item)
+        except Exception as e:  # noqa: BLE001 - reported to the caller, not swallowed
+            return e
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        return list(pool.map(_run, list(items)))
 
 
 @st.cache_data(ttl=900, show_spinner=False)

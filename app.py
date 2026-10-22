@@ -15,7 +15,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 from config import SCORE_LABELS, SCORE_WEIGHTS, RADAR_TICKERS, SECTOR_ETFS, ANTHROPIC_API_KEY, WEEKLY_UNIVERSE
-from utils.cache import get_ticker_info, get_price_history
+from utils.cache import get_ticker_info, get_price_history, parallel_map
 import utils.indicators as mod_ind
 import modules.fundamental  as mod_fund
 import modules.technical    as mod_tech
@@ -680,11 +680,18 @@ def _metric_cell(label: str, value: str, color: str = "#e8edf8") -> str:
             f'</div>')
 
 
+def _safe_href(url) -> str:
+    """HTML-escaped link target; anything that is not http(s) (e.g. javascript:) becomes '#'."""
+    url = str(url or "")
+    return _html.escape(url, quote=True) if url.lower().startswith(("http://", "https://")) else "#"
+
+
 def render_ticker_tape():
     _TAPE = [
         ("^GSPC", "S&P 500"), ("^IXIC", "Nasdaq"), ("^DJI", "Dow 30"),
         ("^VIX", "VIX"), ("BTC-USD", "BTC"), ("GC=F", "Gold"), ("^TNX", "10Y"),
     ]
+    parallel_map(get_ticker_info, [sym for sym, _ in _TAPE])  # fetch all quotes side by side; the loop hits the cache
     items = []
     for sym, label in _TAPE:
         try:
@@ -782,7 +789,7 @@ with st.sidebar:
     with st.expander("📰 Morning Briefing" + ("" if _brief_fresh else " ·🔴 new day"),
                      expanded=False):
         if st.button("☀️ Generate today's briefing" if not _brief_fresh else "🔄 Regenerate",
-                     key="_brief_btn", use_container_width=True):
+                     key="_brief_btn", width="stretch"):
             with st.spinner("Collecting overnight changes..."):
                 st.session_state["_briefing"] = mod_brief.get_briefing(force=True)
         _brief = st.session_state.get("_briefing") or (_brief_cached if _brief_fresh else None)
@@ -827,8 +834,7 @@ with st.sidebar:
 render_ticker_tape()
 
 # Fix sidebar collapse button icon — uses window.parent to escape iframe
-import streamlit.components.v1 as _components
-_components.html("""
+st.iframe("""
 <script>
 (function(){
   const doc = window.parent ? window.parent.document : document;
@@ -851,7 +857,7 @@ _components.html("""
   new MutationObserver(fix).observe(root, {childList:true, subtree:true});
 })();
 </script>
-""", height=0)
+""", height=1)
 
 # ─── Page: Analyze ────────────────────────────────────────────────────────────
 if page == "🔍 Analyze":
@@ -868,7 +874,7 @@ if page == "🔍 Analyze":
             label_visibility="collapsed",
         ).upper().strip()
     with col_btn:
-        run = st.button("Analyze →", type="primary", use_container_width=True)
+        run = st.button("Analyze →", type="primary", width="stretch")
 
     if symbol:
         st.session_state["symbol"] = symbol
@@ -1366,7 +1372,7 @@ if page == "🔍 Analyze":
                 st.markdown('<div class="panel-head">SCORE RADAR</div>', unsafe_allow_html=True)
                 st.plotly_chart(
                     render_radar(s_data["breakdown"], SCORE_WEIGHTS),
-                    use_container_width=True,
+                    width="stretch",
                 )
                 # Score trend — deterioration/improvement before the price shows it
                 _sdelta = mod_shist.get_delta(symbol, days=30)
@@ -1889,7 +1895,7 @@ if page == "🔍 Analyze":
                     font_color="#e8eaf6", showlegend=False,
                     height=350, margin=dict(t=10, b=10),
                 )
-                st.plotly_chart(fig_f, use_container_width=True)
+                st.plotly_chart(fig_f, width="stretch")
 
             # ── Earnings ─────────────────────────────────────────────────────
             st.markdown("---")
@@ -1977,7 +1983,7 @@ if page == "🔍 Analyze":
                                 })
                                 .map(_cs, subset=["Surprise %"])
                                 .map(_cr, subset=["Price Reaction %"]),
-                        use_container_width=True, hide_index=True,
+                        width="stretch", hide_index=True,
                     )
                 else:
                     st.info("No earnings history available.")
@@ -2000,7 +2006,7 @@ if page == "🔍 Analyze":
                         yaxis_title="Reported EPS ($)",
                     )
                     _fig_eps.update_yaxes(gridcolor="#2a3348")
-                    st.plotly_chart(_fig_eps, use_container_width=True)
+                    st.plotly_chart(_fig_eps, width="stretch")
 
             # ── Earnings Quality — forensic red flags (short-seller lens) ────
             st.markdown("---")
@@ -2070,7 +2076,7 @@ if page == "🔍 Analyze":
                 loss  = (-delta.clip(upper=0)).rolling(14).mean()
                 rs    = gain / loss.replace(0, np.nan)
                 df_price["RSI"] = 100 - (100 / (1 + rs))
-                st.plotly_chart(render_price_chart(df_price, symbol), use_container_width=True)
+                st.plotly_chart(render_price_chart(df_price, symbol), width="stretch")
 
                 # ── RSI in Context — trend-adjusted interpretation ────────────
                 _rctx = mod_mctx.rsi_in_context(get_price_history(symbol, period="2y")["Close"].squeeze())
@@ -2165,7 +2171,7 @@ if page == "🔍 Analyze":
             st.subheader("Returns vs Benchmark")
             st.plotly_chart(render_return_bar(
                 mo_data["returns"], mo_data["spy_returns"], symbol
-            ), use_container_width=True)
+            ), width="stretch")
 
             if mo_data.get("rs_vs_qqq_3m") is not None:
                 rs = mo_data["rs_vs_qqq_3m"]
@@ -2267,7 +2273,7 @@ if page == "🔍 Analyze":
                 _n_inst  = len(_inst_df)
                 st.subheader(f"Institutional Holders (top {_n_inst} shown)")
                 if not _inst_df.empty:
-                    st.dataframe(_inst_df, use_container_width=True)
+                    st.dataframe(_inst_df, width="stretch")
                     st.caption("Source: Yahoo Finance — shows up to 10 largest holders.")
                 else:
                     st.info("No institutional holder data available for this stock.")
@@ -2296,7 +2302,7 @@ if page == "🔍 Analyze":
                 _insider_df = i_data.get("insider_df", pd.DataFrame())
                 st.subheader(f"Insider Transactions ({len(_insider_df)} recent)")
                 if not _insider_df.empty:
-                    st.dataframe(_insider_df.head(10), use_container_width=True)
+                    st.dataframe(_insider_df.head(10), width="stretch")
                 else:
                     st.info("No insider transaction data available.")
                 for emoji, msg in i_data.get("signals", []):
@@ -2323,7 +2329,7 @@ if page == "🔍 Analyze":
                         paper_bgcolor="#0e1117", plot_bgcolor="#1a1f2e",
                         font_color="#e8eaf6", margin=dict(t=10, b=10),
                     )
-                    st.plotly_chart(fig_i, use_container_width=True)
+                    st.plotly_chart(fig_i, width="stretch")
                     if routine_pct is not None:
                         st.caption(
                             f"ℹ️ ~{routine_pct:.0f}% of dollar-value selling matches a "
@@ -2361,7 +2367,7 @@ if page == "🔍 Analyze":
                                    gridcolor="#1e2535"),
                         xaxis=dict(showgrid=False),
                     )
-                    st.plotly_chart(_fig_mspr, use_container_width=True)
+                    st.plotly_chart(_fig_mspr, width="stretch")
                     _mspr_avg = sum(_mspr_y) / len(_mspr_y)
                     _mspr_recent = sum(_mspr_y[-3:]) / min(3, len(_mspr_y))
                     if _mspr_recent > 10:
@@ -2543,7 +2549,7 @@ if page == "🔍 Analyze":
                                 "EPS Estimate": lambda x: f"${x:.2f}" if pd.notna(x) else "N/A",
                                 "EPS High":     lambda x: f"${x:.2f}" if pd.notna(x) else "N/A",
                                 "EPS Low":      lambda x: f"${x:.2f}" if pd.notna(x) else "N/A",
-                            }), use_container_width=True, hide_index=True)
+                            }), width="stretch", hide_index=True)
                         else:
                             st.info("No EPS estimates available.")
 
@@ -2559,7 +2565,7 @@ if page == "🔍 Analyze":
                                 "Estimate":   lambda x: f"${x:.2f}" if pd.notna(x) else "N/A",
                                 "Surprise %": lambda x: f"{x:+.1f}%" if pd.notna(x) else "N/A",
                             }).map(_color_surp, subset=["Surprise %"]),
-                            use_container_width=True, hide_index=True)
+                            width="stretch", hide_index=True)
                         else:
                             st.info("No earnings surprise data available.")
 
@@ -2575,10 +2581,10 @@ if page == "🔍 Analyze":
 <div style="display:flex;gap:12px;padding:12px 0;border-bottom:1px solid #2a3348;align-items:flex-start">
   <div style="width:3px;min-height:40px;background:{sc};border-radius:2px;flex-shrink:0;margin-top:2px"></div>
   <div style="flex:1">
-    <a href="{n['url']}" target="_blank" style="color:#e8edf8;text-decoration:none;font-size:13px;
-       font-weight:500;line-height:1.4">{n['headline']}</a>
+    <a href="{_safe_href(n['url'])}" target="_blank" rel="noopener noreferrer" style="color:#e8edf8;text-decoration:none;font-size:13px;
+       font-weight:500;line-height:1.4">{_html.escape(str(n['headline']))}</a>
     <div style="font-size:11px;color:#556070;margin-top:4px;font-family:'IBM Plex Mono',monospace">
-      {n['source']} · {n['date']}
+      {_html.escape(str(n['source']))} · {_html.escape(str(n['date']))}
       <span style="color:{sc};margin-left:8px">{n['sentiment'].upper()}</span>
     </div>
   </div>
@@ -2597,7 +2603,7 @@ if page == "🔍 Analyze":
                             "Value ($K)": lambda x: f"${x:,.0f}K" if pd.notna(x) else "N/A",
                             "Shares":     lambda x: f"{int(x):,}" if pd.notna(x) else "N/A",
                         }).map(_color_type, subset=["Type"]),
-                        use_container_width=True, hide_index=True)
+                        width="stretch", hide_index=True)
                     else:
                         st.info("No insider transaction data available.")
 
@@ -2627,7 +2633,7 @@ if page == "🔍 Analyze":
                                                  "numberOfAnalysts": "# Analysts", "growth": "YoY Growth"})
                                 .style.format({"Avg EPS": "${:.2f}", "Low": "${:.2f}",
                                               "High": "${:.2f}", "YoY Growth": "{:+.1%}"}),
-                            use_container_width=True,
+                            width="stretch",
                         )
                     else:
                         st.info("No EPS estimates available.")
@@ -2640,7 +2646,7 @@ if page == "🔍 Analyze":
                                                  "numberOfAnalysts": "# Analysts", "growth": "YoY Growth"})
                                 .style.format({"Avg Revenue": "${:,.0f}", "Low": "${:,.0f}",
                                               "High": "${:,.0f}", "YoY Growth": "{:+.1%}"}),
-                            use_container_width=True,
+                            width="stretch",
                         )
                     else:
                         st.info("No revenue estimates available.")
@@ -2688,7 +2694,7 @@ if page == "🔍 Analyze":
                         st.markdown(f"🔴 {g}")
 
             with col_r_m:
-                st.plotly_chart(render_gauge(m_data["score"], "Macro Score"), use_container_width=True)
+                st.plotly_chart(render_gauge(m_data["score"], "Macro Score"), width="stretch")
                 mscore = m_data.get("score", 5)
                 if mscore >= 7.5:
                     mv, mc = "✅ Strong macro tailwind — environment is supportive", "#16c784"
@@ -2764,7 +2770,7 @@ if page == "🔍 Analyze":
                     "1Y Return":    lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "N/A",
                     "Market Cap":   lambda x: fmt_num(x) if pd.notna(x) else "N/A",
                 }).map(color_pct, subset=["1M Return","3M Return","1Y Return","Rev Growth"])
-                st.dataframe(styled, use_container_width=True)
+                st.dataframe(styled, width="stretch")
 
                 fig_p = go.Figure()
                 for _, row in peer_df.iterrows():
@@ -2782,7 +2788,7 @@ if page == "🔍 Analyze":
                     paper_bgcolor="#0e1117", plot_bgcolor="#1a1f2e",
                     font_color="#e8edf8", height=350,
                 )
-                st.plotly_chart(fig_p, use_container_width=True)
+                st.plotly_chart(fig_p, width="stretch")
 
             # Sector ETF Holdings
             _sec_etf = SECTOR_ETFS.get(sector)
@@ -2827,7 +2833,7 @@ if page == "🔍 Analyze":
                     _hist_fig.update_yaxes(title="Index (start=100)", gridcolor="#2a3348")
                 else:
                     _hist_fig.update_yaxes(gridcolor="#2a3348")
-                st.plotly_chart(_hist_fig, use_container_width=True)
+                st.plotly_chart(_hist_fig, width="stretch")
 
             _hcat = METRICS_CATALOG.get(_metric_key_h, {})
             if _hcat.get("signal_good"):
@@ -3474,7 +3480,7 @@ if page == "🔍 Analyze":
                         margin=dict(l=40, r=40, t=25, b=25), showlegend=False,
                         title=dict(text="Factor Profile", font=dict(size=12, color="#cdd6f4"), x=0),
                     )
-                    st.plotly_chart(_fig_rad, use_container_width=True,
+                    st.plotly_chart(_fig_rad, width="stretch",
                                     config={"displayModeBar": False})
                     st.markdown("**Style fit:**", help=mod_gloss.tip("factor_method"))
                     for _sf in _fac["style_fits"]:
@@ -3549,7 +3555,7 @@ if page == "🔍 Analyze":
                     height=330, margin=dict(l=0, r=0, t=40, b=0),
                     showlegend=False,
                 )
-                st.plotly_chart(_fig_seas, use_container_width=True)
+                st.plotly_chart(_fig_seas, width="stretch")
 
                 # Heatmap table
                 _hmap = _seas.get("heatmap", {})
@@ -3822,7 +3828,7 @@ if page == "🔍 Analyze":
                             yaxis=dict(title="$B", gridcolor="#1e2535"),
                             legend=dict(orientation="h", y=1.1, x=0),
                         )
-                        st.plotly_chart(_fig_rdcf, use_container_width=True,
+                        st.plotly_chart(_fig_rdcf, width="stretch",
                                         config={"displayModeBar": False})
                         st.caption("Margin ramps linearly from today's level to the target "
                                    "by Year 5.")
@@ -3897,7 +3903,7 @@ if page == "🔍 Analyze":
                         yaxis=dict(title="$B", gridcolor="#1e2535"),
                         legend=dict(orientation="h", y=1.1, x=0),
                     )
-                    st.plotly_chart(_fig_dcf, use_container_width=True,
+                    st.plotly_chart(_fig_dcf, width="stretch",
                                     config={"displayModeBar": False})
 
                     # Sensitivity matrix
@@ -3919,7 +3925,7 @@ if page == "🔍 Analyze":
                                 "color: #ea3a44" if v < _px * 0.85 else "color: #f0b90b")
                     st.dataframe(
                         _sens.style.format("${:,.0f}").map(_sens_color),
-                        use_container_width=True,
+                        width="stretch",
                     )
                     st.caption("Green = >15% above market price at those assumptions · "
                                "Red = >15% below · Amber = near market price.")
@@ -4136,7 +4142,7 @@ elif page == "🌍 Market Radar":
                 "3M Return":   lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "N/A",
                 "6M Return":   lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "N/A",
             }).apply(highlight_row, axis=1)
-            st.dataframe(styled, use_container_width=True)
+            st.dataframe(styled, width="stretch")
 
             st.caption(f"Showing {len(filtered)} of {len(df)} tickers. Click Ticker → paste in Analyze tab.")
 
@@ -4176,7 +4182,7 @@ elif page == "💼 Portfolio":
     with col_dl:
         sample_csv = "Ticker,Shares,Avg Price\nNVDA,10,500\nQQQ,5,450\nKWEB,20,30\n"
         st.download_button("📥 Sample CSV", sample_csv, "portfolio_sample.csv",
-                           "text/csv", use_container_width=True)
+                           "text/csv", width="stretch")
 
     if uploaded:
         df_raw, fmt = mod_portfolio.load_portfolio(uploaded)
@@ -4227,7 +4233,7 @@ elif page == "💼 Portfolio":
                 "P&L (NIS)":     lambda x: f"₪{x:+,.0f}" if pd.notna(x) else "N/A",
             }).map(_cp, subset=["P&L (%)", "P&L (NIS)"])
 
-            st.dataframe(styled_b, use_container_width=True, hide_index=True)
+            st.dataframe(styled_b, width="stretch", hide_index=True)
 
             try:
                 st.download_button(
@@ -4248,7 +4254,7 @@ elif page == "💼 Portfolio":
                             unsafe_allow_html=True)
                 btn_cols = st.columns(min(len(us_tickers), 6))
                 for i, tk in enumerate(us_tickers):
-                    if btn_cols[i % 6].button(tk, key=f"pt_{tk}", use_container_width=True):
+                    if btn_cols[i % 6].button(tk, key=f"pt_{tk}", width="stretch"):
                         st.session_state["symbol"] = tk
                         st.rerun()
 
@@ -4272,7 +4278,7 @@ elif page == "💼 Portfolio":
                     showlegend=True, height=320,
                     margin=dict(t=10, b=10, l=10, r=10),
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
             with col_bar:
                 st.markdown('<div class="panel-head">US vs ISRAELI SPLIT</div>', unsafe_allow_html=True)
@@ -4302,7 +4308,7 @@ elif page == "💼 Portfolio":
                         showlegend=True,
                     )
                     fig_bar.update_yaxes(gridcolor="#2a3348")
-                    st.plotly_chart(fig_bar, use_container_width=True)
+                    st.plotly_chart(fig_bar, width="stretch")
 
             # ── Portfolio Health Check ─────────────────────────────────────────
             st.markdown("---")
@@ -4595,7 +4601,7 @@ elif page == "💼 Portfolio":
                                 height=max(300, len(_corr) * 45 + 60),
                                 margin=dict(t=10, b=10, l=10, r=10),
                             )
-                            st.plotly_chart(fig_corr_b, use_container_width=True)
+                            st.plotly_chart(fig_corr_b, width="stretch")
             else:
                 st.info("Need at least 2 US stock positions to compute risk metrics.")
 
@@ -4638,7 +4644,7 @@ elif page == "💼 Portfolio":
                     "P&L ($)":       lambda x: f"${x:+,.0f}",
                     "P&L (%)":       lambda x: f"{x*100:+.1f}%",
                 }).map(color_pnl, subset=["P&L ($)", "P&L (%)"])
-                st.dataframe(styled_p, use_container_width=True)
+                st.dataframe(styled_p, width="stretch")
 
                 try:
                     st.download_button(
@@ -4664,7 +4670,7 @@ elif page == "💼 Portfolio":
                     paper_bgcolor="#131722", font_color="#e8edf8",
                     showlegend=True, height=350, margin=dict(t=10, b=10),
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
             # ── ⚖️ Portfolio Risk & Correlation ───────────────────────────────
             st.markdown("---")
@@ -4736,7 +4742,7 @@ elif page == "💼 Portfolio":
                             height=max(300, len(corr_df) * 45 + 60),
                             margin=dict(t=10, b=10, l=10, r=10),
                         )
-                        st.plotly_chart(fig_corr, use_container_width=True)
+                        st.plotly_chart(fig_corr, width="stretch")
 
 
 # ─── Page: Watchlist ──────────────────────────────────────────────────────────
@@ -4812,7 +4818,7 @@ elif page == "👁 Watchlist":
             "Score":      lambda x: f"{x:.1f}"        if pd.notna(x) else "N/A",
         }).map(color_rating, subset=["Rating"])
 
-        st.dataframe(styled, use_container_width=True)
+        st.dataframe(styled, width="stretch")
 
 
 # ─── Page: Weekly Picks ──────────────────────────────────────────────────────
@@ -4850,7 +4856,7 @@ elif page == "⭐ Weekly Picks":
             if _lbl:
                 st.caption(f"💾 {_lbl} — results auto-saved between sessions")
         with hcol2:
-            run_weekly = st.button("🔄 Refresh Scan", type="primary", use_container_width=True)
+            run_weekly = st.button("🔄 Refresh Scan", type="primary", width="stretch")
     else:
         run_weekly = st.button("🔍 Scan for This Week's Opportunities", type="primary")
 
@@ -5064,7 +5070,7 @@ elif page == "⭐ Weekly Picks":
                         st.markdown("**⚠️ Risk**"); st.write(thesis.get("key_risk") or "—")
             _, etf_btn_col = st.columns([5, 1])
             with etf_btn_col:
-                if st.button("Deep Dive →", key=f"wp_etf_{r['symbol']}", use_container_width=True):
+                if st.button("Deep Dive →", key=f"wp_etf_{r['symbol']}", width="stretch"):
                     st.session_state["symbol"] = r["symbol"]
                     st.session_state["_az_sym"] = r["symbol"]
                     st.session_state["page_jump"] = "🔍 Analyze"
@@ -5348,7 +5354,7 @@ elif page == "⭐ Weekly Picks":
         # ── DEEP DIVE ─────────────────────────────────────────────────────────
         _, btn_col = st.columns([5, 1])
         with btn_col:
-            if st.button("Deep Dive →", key=f"wp_{r['symbol']}", use_container_width=True):
+            if st.button("Deep Dive →", key=f"wp_{r['symbol']}", width="stretch"):
                 st.session_state["symbol"] = r["symbol"]
                 st.session_state["_az_sym"] = r["symbol"]
                 st.session_state["page_jump"] = "🔍 Analyze"
@@ -5391,7 +5397,7 @@ elif page == "🏥 Market Health":
 
     col_ref, col_load = st.columns([4, 1])
     with col_load:
-        refresh = st.button("🔄 Refresh", type="primary", use_container_width=True)
+        refresh = st.button("🔄 Refresh", type="primary", width="stretch")
 
     if refresh or "mhealth_data" not in st.session_state:
         with st.spinner("Loading macro & market data..."):
@@ -5611,7 +5617,7 @@ elif page == "🏥 Market Health":
         )
         fig_h.update_xaxes(gridcolor="#2a3348")
         fig_h.update_yaxes(gridcolor="#2a3348")
-        st.plotly_chart(fig_h, use_container_width=True)
+        st.plotly_chart(fig_h, width="stretch")
     except Exception as e:
         st.warning(f"Could not load historical chart: {e}")
 
@@ -5727,7 +5733,7 @@ elif page == "🔄 Sector Rotation":
                    tickangle=-45),
         showlegend=False,
     )
-    st.plotly_chart(fig_rs, use_container_width=True)
+    st.plotly_chart(fig_rs, width="stretch")
 
     st.divider()
 
@@ -5789,7 +5795,7 @@ elif page == "🔄 Sector Rotation":
         yaxis=dict(title="1M Return (%)", gridcolor="#2a3348",
                    zeroline=False, ticksuffix="%"),
     )
-    st.plotly_chart(fig_quad, use_container_width=True)
+    st.plotly_chart(fig_quad, width="stretch")
 
     st.divider()
 
@@ -5822,7 +5828,7 @@ elif page == "🔄 Sector Rotation":
         "RS vs SPY": lambda x: f"{x:+.1f}%",
         "Score":     lambda x: f"{x:.1f}",
     }).map(_color_ret, subset=["1M Ret", "3M Ret", "RS vs SPY"])
-    st.dataframe(styled_rot, use_container_width=True, hide_index=True)
+    st.dataframe(styled_rot, width="stretch", hide_index=True)
 
     st.caption(
         "↑ = 1M RS accelerating vs 3M baseline  ·  → = stable  ·  ↓ = decelerating. "
@@ -5897,7 +5903,7 @@ elif page == "📰 News Feed":
     with nf_col2:
         sent_filter = st.selectbox("Sentiment", list(_NF_SENT_OPTS.keys()))
     with nf_col1:
-        run_nf = st.button("🗞 Load News", type="primary", use_container_width=True,
+        run_nf = st.button("🗞 Load News", type="primary", width="stretch",
                             disabled=not nf_sources)
 
     if run_nf:
@@ -6044,7 +6050,7 @@ elif page == "📰 News Feed":
             legend=dict(orientation="h", yanchor="bottom", y=1.15, x=0),
             hovermode="x unified",
         )
-        st.plotly_chart(_fig_sm, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(_fig_sm, width="stretch", config={"displayModeBar": False})
 
         # Quick KPI row below chart
         _total_all = sum(_total_vals)
@@ -6076,7 +6082,7 @@ elif page == "📰 News Feed":
         source   = _e(n.get("source", ""))
         sent     = n.get("sentiment", "neutral")
         sc       = _SENT_COLOR.get(sent, "#556070")
-        url      = n.get("url", "#")
+        url      = _safe_href(n.get("url"))
         summary  = _e((n.get("summary") or "")[:160])
 
         sym_badge = (
@@ -6093,7 +6099,7 @@ elif page == "📰 News Feed":
             f'{date_str} &nbsp;&#183;&nbsp; {source}</span>'
         )
         headline_link = (
-            f'<a href="{url}" target="_blank" style="color:#e8edf8;text-decoration:none;'
+            f'<a href="{url}" target="_blank" rel="noopener noreferrer" style="color:#e8edf8;text-decoration:none;'
             f'font-size:14px;font-weight:600;line-height:1.5">{headline}</a>'
         )
         summary_html = (
@@ -6156,7 +6162,7 @@ elif page == "🔎 AI Screener":
     st.markdown('<div class="panel-head">EXAMPLES</div>', unsafe_allow_html=True)
     ecols = st.columns(2)
     for i, ex in enumerate(examples):
-        if ecols[i % 2].button(f"💬 {ex[:60]}", key=f"ex_{i}", use_container_width=True):
+        if ecols[i % 2].button(f"💬 {ex[:60]}", key=f"ex_{i}", width="stretch"):
             st.session_state["screener_query"] = ex
 
     query = st.text_area(
@@ -6242,7 +6248,7 @@ elif page == "🔎 AI Screener":
                 showlegend=False, height=300,
                 margin=dict(t=10, b=10, l=10, r=10),
             )
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, width="stretch")
 
         with col_cards:
             st.markdown('<div class="panel-head">POSITIONS</div>', unsafe_allow_html=True)
@@ -6278,7 +6284,7 @@ elif page == "🔎 AI Screener":
     <span>Sector <b style="color:#e8edf8">{ld.get('sector','')[:18]}</b></span>
   </div>
 </div>""", unsafe_allow_html=True)
-                if st.button(f"Deep dive {tk}", key=f"pd_{tk}", use_container_width=False):
+                if st.button(f"Deep dive {tk}", key=f"pd_{tk}", width="content"):
                     st.session_state["symbol"] = tk
                     st.session_state["_az_sym"] = tk
                     st.session_state["page_jump"] = "🔍 Analyze"
@@ -6463,7 +6469,7 @@ elif page == "🔎 AI Screener":
             c1, c2 = st.columns([3, 1])
             with c2:
                 if st.button(f"Deep dive {r['symbol']}", key=f"dd_{r['symbol']}",
-                             use_container_width=True):
+                             width="stretch"):
                     st.session_state["symbol"] = r["symbol"]
                     st.session_state["_az_sym"] = r["symbol"]
                     st.session_state["page_jump"] = "🔍 Analyze"
@@ -6750,7 +6756,7 @@ elif page == "🎯 Tracker":
             yaxis=dict(tickprefix="$", tickformat=",.0f", gridcolor="#1e2535"),
             xaxis=dict(showgrid=False),
         )
-        st.plotly_chart(_fig_vh, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(_fig_vh, width="stretch", config={"displayModeBar": False})
 
     if _tp.get("rebalance_log"):
         with st.expander(f"📜 Rebalance history ({len(_tp['rebalance_log'])})"):
@@ -6887,7 +6893,7 @@ elif page == "🎯 Tracker":
                     yaxis=dict(tickprefix="$", tickformat=",.0f", gridcolor="#1e2535"),
                     legend=dict(orientation="h", y=1.05, x=0),
                 )
-                st.plotly_chart(_fig_mc, use_container_width=True,
+                st.plotly_chart(_fig_mc, width="stretch",
                                 config={"displayModeBar": False})
                 st.caption(f"Annualized portfolio vol: {_mc['ann_vol']}%")
 
@@ -6939,7 +6945,7 @@ elif page == "📊 Backtester":
 
     st.markdown("---")
 
-    if st.button("▶ Run Backtest", type="primary", use_container_width=False):
+    if st.button("▶ Run Backtest", type="primary", width="content"):
         st.session_state["_bt_result"] = None  # clear previous
         with st.spinner(f"Backtesting {bt_strategy} on {bt_symbol} ({bt_period})..."):
             _bt_res = mod_bt.run_backtest(bt_symbol, bt_strategy, bt_period, bt_capital, bt_params)
@@ -7048,7 +7054,7 @@ elif page == "📊 Backtester":
                     font=dict(size=13, color="#e8edf8"),
                 ),
             )
-            st.plotly_chart(_fig, use_container_width=True)
+            st.plotly_chart(_fig, width="stretch")
 
             # ── Trade log ─────────────────────────────────────────────────────
             _trades = _bt_res["trades"]
@@ -7134,12 +7140,12 @@ elif page == "📝 Paper Portfolio":
             st.rerun()
 
     with _new_col:
-        if st.button("➕ New Portfolio", use_container_width=True):
+        if st.button("➕ New Portfolio", width="stretch"):
             st.session_state["_pp_show_new"] = True
 
     with _del_col:
         if len(_pp_names) > 1:
-            if st.button("🗑 Delete", use_container_width=True):
+            if st.button("🗑 Delete", width="stretch"):
                 st.session_state["_pp_confirm_delete"] = True
 
     # Confirm delete
@@ -7256,7 +7262,7 @@ elif page == "📝 Paper Portfolio":
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
             hovermode="x unified",
         )
-        st.plotly_chart(_fig_eq, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(_fig_eq, width="stretch", config={"displayModeBar": False})
 
     # ── Add Trade Form ─────────────────────────────────────────────────────────
     st.subheader("Execute Trade")
@@ -7283,7 +7289,7 @@ elif page == "📝 Paper Portfolio":
         _tr_reason = st.text_input("Why this trade?", placeholder="e.g. Breakout above 200MA on volume surge", key="_pp_reason")
     with _tf6:
         st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        _tr_exec = st.button("▶ Execute", type="primary", use_container_width=True, key="_pp_exec")
+        _tr_exec = st.button("▶ Execute", type="primary", width="stretch", key="_pp_exec")
 
     if _tr_exec and _tr_sym:
         _updated_pp, _err = mod_pp.add_trade(
@@ -7539,7 +7545,7 @@ elif page == "📝 Paper Portfolio":
                            tickprefix="$", tickformat=",.0f"),
                 hovermode="x unified",
             )
-            st.plotly_chart(_fig_perf, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(_fig_perf, width="stretch", config={"displayModeBar": False})
 
     # ── Lessons ────────────────────────────────────────────────────────────────
     with _tab_les:
@@ -7637,7 +7643,7 @@ elif page == "📝 Paper Portfolio":
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
                 hovermode="x unified",
             )
-            st.plotly_chart(_fig_cmp, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(_fig_cmp, width="stretch", config={"displayModeBar": False})
 
             # Summary table
             _cmp_display = _cmp_df.copy()
@@ -7649,7 +7655,7 @@ elif page == "📝 Paper Portfolio":
             st.dataframe(
                 _cmp_display[["Portfolio", "Sentiment", "Total Return", "Total P&L $",
                                "Holdings", "Closed Trades", "Win Rate", "Best Trade %", "Sharpe"]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -7706,7 +7712,7 @@ elif page == "🧠 Alpha Lab":
 
         if "_al_scan_df" in st.session_state and not st.session_state["_al_scan_df"].empty:
             _al_df = st.session_state["_al_scan_df"].sort_values("Consensus", ascending=False)
-            st.dataframe(_al_df, use_container_width=True, hide_index=True)
+            st.dataframe(_al_df, width="stretch", hide_index=True)
             st.caption("Open a ticker in Analyze → Fund Models for the full per-model breakdown.")
 
     # ── Tab 2: New Frameworks ─────────────────────────────────────────────────
@@ -7951,7 +7957,7 @@ elif page == "🧠 Alpha Lab":
                     paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", height=420,
                     font=dict(color="#cdd6f4"), margin=dict(l=40, r=40, t=20, b=40),
                 )
-                st.plotly_chart(_fig_ef, use_container_width=True, config={"displayModeBar": False})
+                st.plotly_chart(_fig_ef, width="stretch", config={"displayModeBar": False})
 
                 _efc1, _efc2 = st.columns(2)
                 with _efc1:
@@ -7960,14 +7966,14 @@ elif page == "🧠 Alpha Lab":
                                    f"Vol {_ef['max_sharpe']['vol_pct']}% · Sharpe {_ef['max_sharpe']['sharpe']}")
                         st.dataframe(pd.DataFrame(_ef["max_sharpe"]["weights"].items(),
                                                   columns=["Ticker", "Weight %"]),
-                                    use_container_width=True, hide_index=True)
+                                    width="stretch", hide_index=True)
                 with _efc2:
                     if _ef["min_vol"]:
                         st.markdown(f"**Min Vol** — Return {_ef['min_vol']['return_pct']}% · "
                                    f"Vol {_ef['min_vol']['vol_pct']}% · Sharpe {_ef['min_vol']['sharpe']}")
                         st.dataframe(pd.DataFrame(_ef["min_vol"]["weights"].items(),
                                                   columns=["Ticker", "Weight %"]),
-                                    use_container_width=True, hide_index=True)
+                                    width="stretch", hide_index=True)
 
                 _popt_cur = st.session_state.get("_al_popt_current_weights")
                 if _popt_cur:
@@ -7983,7 +7989,7 @@ elif page == "🧠 Alpha Lab":
                             "Min Vol %":  (_ef["min_vol"]["weights"].get(_sym, 0.0)
                                           if _ef["min_vol"] else None),
                         })
-                    st.dataframe(pd.DataFrame(_cmp_rows), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(_cmp_rows), width="stretch", hide_index=True)
                     st.caption("How far your actual allocation sits from the mean-variance-optimal "
                               "mix — a large gap isn't automatically wrong (conviction/taxes/thesis "
                               "matter too), but it's worth knowing it exists.")
@@ -8003,11 +8009,11 @@ elif page == "🧠 Alpha Lab":
                 st.markdown("**Most PC1-exposed (highest shared-factor bet):**")
                 st.dataframe(pd.DataFrame(_pca["top_pc1_exposure"].items(),
                                           columns=["Ticker", "|PC1 loading|"]),
-                            use_container_width=True, hide_index=True)
+                            width="stretch", hide_index=True)
                 st.markdown("**Least PC1-exposed (best diversifiers in this set):**")
                 st.dataframe(pd.DataFrame(_pca["bottom_pc1_exposure"].items(),
                                           columns=["Ticker", "|PC1 loading|"]),
-                            use_container_width=True, hide_index=True)
+                            width="stretch", hide_index=True)
 
     # ── Tab 6: Validation ─────────────────────────────────────────────────────
     with _tab_val:
@@ -8072,7 +8078,7 @@ elif page == "🧠 Alpha Lab":
             st.info(f"No forward-return-eligible scores yet{_sv_note}. Keep using Analyze/Weekly "
                    f"Picks — this fills in over time.")
         else:
-            st.dataframe(pd.DataFrame(_sv["buckets"]), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(_sv["buckets"]), width="stretch", hide_index=True)
             st.caption(f"{_sv['n_total']} samples, {_sv_horizon}-day forward horizon, "
                       f"oldest record {_sv['oldest_record']}.")
 
@@ -8114,7 +8120,7 @@ elif page == "🧠 Alpha Lab":
             {"Framework": "Efficient Frontier (Markowitz)", "Source": "Markowitz (1952); RN SB Python for Finance - Quantitative Analytics"},
             {"Framework": "PCA Factor Decomposition", "Source": "RN SB Python for Finance - Quantitative Analytics"},
         ]
-        st.dataframe(pd.DataFrame(_src_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(_src_rows), width="stretch", hide_index=True)
 
 
 # ─── Page: Glossary ────────────────────────────────────────────────────────────
