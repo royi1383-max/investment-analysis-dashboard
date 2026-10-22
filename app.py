@@ -44,6 +44,7 @@ import modules.backtester       as mod_bt
 import modules.paper_portfolio  as mod_pp
 import modules.tracked_portfolio as mod_tp
 import modules.dcf              as mod_dcf
+import modules.hot_tickers      as mod_hot
 import modules.fund_models      as mod_fm
 import modules.excel_export     as mod_xlsx
 import modules.risk_tools       as mod_rt
@@ -887,10 +888,27 @@ if page == "🔍 Analyze":
                     st.caption("No matches.")
                 for _h in _hits:
                     if st.button(f'{_h["symbol"]} — {_h["name"]}', key=f'_az_hit_{_h["symbol"]}'):
-                        st.session_state["symbol"] = _h["symbol"]
+                        st.session_state["symbol"] = st.session_state["_az_sym"] = _h["symbol"]
                         st.rerun()
     with col_btn:
         run = st.button("Analyze →", type="primary", width="stretch")
+
+    if st.toggle("🔥 What's hot right now", key="_az_hot_on",
+                 help="Most active, top gainers and upcoming earnings. Attention signals, not buy recommendations."):
+        _hot = mod_hot.get_hot_tickers()
+        if not _hot:
+            st.caption("Could not load market movers right now.")
+        for _title, _rows in _hot.items():
+            st.caption(_title)
+            _cols = st.columns(len(_rows))
+            for _i, _r in enumerate(_rows):
+                if "change_pct" in _r and _r["change_pct"] is not None:
+                    _lbl = f'{_r["symbol"]} {_r["change_pct"]:+.1f}%'
+                else:
+                    _lbl = f'{_r["symbol"]} · {_r.get("date", "")[5:]}'
+                if _cols[_i].button(_lbl, key=f"_hot_{_title}_{_r['symbol']}", width="stretch"):
+                    st.session_state["symbol"] = st.session_state["_az_sym"] = _r["symbol"]
+                    st.rerun()
 
     if symbol:
         st.session_state["symbol"] = symbol
