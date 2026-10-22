@@ -11,7 +11,6 @@ Checks from yfinance financial statements:
 
 Each check returns (status, detail): "good" / "warn" / "flag" / "na".
 """
-import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf

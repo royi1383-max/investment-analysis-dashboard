@@ -13,6 +13,15 @@ def _safe(val, default=None):
     return val
 
 
+def _row_val(df: pd.DataFrame, row: str):
+    """Latest (most recent column) value for a named row in an income/balance/
+    cashflow statement. None if the row or a usable value isn't there."""
+    if df is None or df.empty or row not in df.index:
+        return None
+    series = df.loc[row].dropna()
+    return float(series.iloc[0]) if not series.empty else None
+
+
 def _score_peg(peg):
     if peg is None: return 5
     if peg < 0:     return 4
@@ -77,6 +86,54 @@ def _score_debt_equity(de):
     return 1
 
 
+def _score_earnings_growth(g):
+    if g is None: return 5
+    if g > 0.40:  return 10
+    if g > 0.20:  return 8
+    if g > 0.10:  return 6
+    if g > 0:     return 4
+    return 1
+
+
+def _score_interest_coverage(ic, has_debt):
+    if ic is None:
+        return 8 if not has_debt else 5   # debt-free: no interest burden, that's a good sign
+    if ic > 10:  return 10
+    if ic > 5:   return 8
+    if ic > 2:   return 6
+    if ic > 1:   return 3
+    return 1   # can't cover interest from operating earnings — real distress signal
+
+
+def _score_roic(roic):
+    if roic is None: return 5
+    if roic > 0.25:  return 10
+    if roic > 0.15:  return 8
+    if roic > 0.08:  return 6
+    if roic > 0.03:  return 4
+    if roic > 0:     return 2
+    return 1
+
+
+def _score_net_debt_ebitda(nd_ebitda):
+    if nd_ebitda is None:  return 5
+    if nd_ebitda <= 0:     return 10   # net cash position
+    if nd_ebitda < 1:      return 9
+    if nd_ebitda < 2:      return 7
+    if nd_ebitda < 3:      return 5
+    if nd_ebitda < 5:      return 3
+    return 1
+
+
+def _score_sbc_pct(sbc_pct):
+    if sbc_pct is None: return 5
+    if sbc_pct < 0.03:  return 9
+    if sbc_pct < 0.07:  return 7
+    if sbc_pct < 0.12:  return 5
+    if sbc_pct < 0.20:  return 3
+    return 1
+
+
 def analyze(symbol: str) -> dict:
     info = get_ticker_info(symbol)
     income, balance, cashflow = get_financials(symbol)
@@ -115,37 +172,73 @@ def analyze(symbol: str) -> dict:
     if revenue_growth is not None and fcf_margin is not None:
         rule40 = (revenue_growth * 100) + (fcf_margin * 100)
 
+    # ── Quality / solvency ratios from the raw statements (income/balance/
+    # cashflow were already being fetched above but never used) ──────────────
+    ebit             = _row_val(income, "EBIT")
+    interest_expense = _row_val(income, "Interest Expense")
+    tax_rate         = _row_val(income, "Tax Rate For Calcs")
+    invested_capital = _row_val(balance, "Invested Capital")
+    net_debt_row     = _row_val(balance, "Net Debt")
+    ebitda           = _safe(info.get("ebitda"))
+    sbc              = _row_val(cashflow, "Stock Based Compensation")
+    capex            = _row_val(cashflow, "Capital Expenditure")   # yfinance reports this negative
+
+    interest_coverage = (ebit / abs(interest_expense)) \
+        if ebit is not None and interest_expense else None
+    roic = (ebit * (1 - (tax_rate if tax_rate is not None else 0.21)) / invested_capital) \
+        if ebit is not None and invested_capital else None
+    net_debt = net_debt_row if net_debt_row is not None else (
+        (total_debt - _safe(info.get("totalCash"), 0)) if total_debt is not None else None)
+    net_debt_ebitda = (net_debt / ebitda) if net_debt is not None and ebitda else None
+    sbc_pct = (sbc / revenue_ttm) if sbc and revenue_ttm and revenue_ttm > 0 else None
+    capex_pct = (abs(capex) / revenue_ttm) if capex and revenue_ttm and revenue_ttm > 0 else None
+
     # ── Scores ───────────────────────────────────────────────────────────────
     scores = {
-        "PEG Ratio":        _score_peg(peg),
-        "P/S Ratio":        _score_ps(ps_ratio),
-        "Gross Margin":     _score_gross_margin(gross_margin),
-        "Revenue Growth":   _score_revenue_growth(revenue_growth),
-        "Rule of 40":       _score_rule40(rule40),
-        "FCF Yield":        _score_fcf_yield(fcf_yield),
-        "Debt/Equity":      _score_debt_equity(debt_equity),
+        "PEG Ratio":          _score_peg(peg),
+        "P/S Ratio":          _score_ps(ps_ratio),
+        "Gross Margin":       _score_gross_margin(gross_margin),
+        "Revenue Growth":     _score_revenue_growth(revenue_growth),
+        "Earnings Growth":    _score_earnings_growth(earnings_growth),
+        "Rule of 40":         _score_rule40(rule40),
+        "FCF Yield":          _score_fcf_yield(fcf_yield),
+        "Debt/Equity":        _score_debt_equity(debt_equity),
+        "Interest Coverage":  _score_interest_coverage(interest_coverage, bool(total_debt)),
+        "ROIC":               _score_roic(roic),
+        "Net Debt/EBITDA":    _score_net_debt_ebitda(net_debt_ebitda),
+        "SBC % Revenue":      _score_sbc_pct(sbc_pct),
     }
 
     weights = {
-        "Revenue Growth": 0.25,
-        "Rule of 40":     0.20,
-        "Gross Margin":   0.20,
-        "PEG Ratio":      0.15,
-        "FCF Yield":      0.10,
-        "P/S Ratio":      0.05,
-        "Debt/Equity":    0.05,
+        "Revenue Growth":    0.18,
+        "Earnings Growth":   0.09,
+        "Rule of 40":        0.15,
+        "Gross Margin":      0.12,
+        "ROIC":              0.10,
+        "PEG Ratio":         0.10,
+        "Interest Coverage": 0.06,
+        "Net Debt/EBITDA":   0.06,
+        "FCF Yield":         0.06,
+        "SBC % Revenue":     0.04,
+        "P/S Ratio":         0.02,
+        "Debt/Equity":       0.02,
     }
     total_score = sum(scores[k] * weights[k] for k in scores)
 
-    # Track which scored metrics were unavailable (defaulted to 5 / 6)
+    # Track which scored metrics were unavailable (defaulted to a neutral score)
     _scored_inputs = {
-        "PEG Ratio":      peg,
-        "P/S Ratio":      ps_ratio,
-        "Gross Margin":   gross_margin,
-        "Revenue Growth": revenue_growth,
-        "Rule of 40":     rule40,
-        "FCF Yield":      fcf_yield,
-        "Debt/Equity":    debt_equity,
+        "PEG Ratio":         peg,
+        "P/S Ratio":         ps_ratio,
+        "Gross Margin":      gross_margin,
+        "Revenue Growth":    revenue_growth,
+        "Earnings Growth":   earnings_growth,
+        "Rule of 40":        rule40,
+        "FCF Yield":         fcf_yield,
+        "Debt/Equity":       debt_equity,
+        "Interest Coverage": interest_coverage,
+        "ROIC":              roic,
+        "Net Debt/EBITDA":   net_debt_ebitda,
+        "SBC % Revenue":     sbc_pct,
     }
     missing_metrics = [k for k, v in _scored_inputs.items() if v is None]
 
@@ -168,6 +261,14 @@ def analyze(symbol: str) -> dict:
             "Debt/Equity":     debt_equity,
             "R&D % Revenue":   rd_pct,
             "Rule of 40":      rule40,
+            "Interest Coverage": interest_coverage,
+            "ROIC":            roic,
+            "Net Debt/EBITDA": net_debt_ebitda,
+            "SBC % Revenue":   sbc_pct,
+            # Informational only, not scored — capex direction is context-
+            # dependent (heavy reinvestment can be healthy, not a red flag),
+            # already indirectly reflected in FCF Margin above (OCF - capex).
+            "CapEx % Revenue": capex_pct,
         },
         # Data quality metadata
         "missing_metrics": missing_metrics,

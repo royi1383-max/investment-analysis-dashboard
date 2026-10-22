@@ -2,12 +2,12 @@
 Market Health Dashboard — macro & sentiment indicators.
 Data: yfinance (VIX, yields, indices, commodities) + FRED API (rates, CPI, unemployment).
 """
+import json
 import yfinance as yf
-import pandas as pd
-import numpy as np
 import requests
 import streamlit as st
-from config import FRED_API_KEY
+from config import FRED_API_KEY, ANTHROPIC_API_KEY
+from utils.claude_client import get_client as _get_client
 
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 
@@ -56,6 +56,20 @@ INDICATORS = {
         "invest_signal": "Curve re-steepening after inversion = recession starting. First 6 months of re-steepen = worst for stocks.",
         "format": "pct_raw",
     },
+    "yield_10y": {
+        "label": "10-Year Treasury Yield",
+        "source": "fred", "series": "DGS10",
+        "category": "Macro Environment",
+        "desc": "The benchmark long-term rate — the discount rate used to value future cash flows, so it drives equity multiples directly (especially high-multiple growth names) and sets the 'risk-free' bar every other asset is priced against.",
+        "thresholds": [
+            (0,   3.5, "green",  "Low — supportive of high equity multiples"),
+            (3.5, 4.5, "yellow", "Moderate — normal historical range"),
+            (4.5, 5.0, "yellow", "Elevated — headwind for long-duration/growth multiples"),
+            (5.0, 999, "red",    "High — significant multiple-compression pressure, competes hard with equities for capital"),
+        ],
+        "invest_signal": "Rising 10Y = money rotates from long-duration growth/tech into value, financials, and short-duration cash-like instruments. Falling 10Y reverses that flow.",
+        "format": "pct_raw",
+    },
     "fed_rate": {
         "label": "Fed Funds Rate",
         "source": "fred", "series": "FEDFUNDS",
@@ -72,7 +86,7 @@ INDICATORS = {
     },
     "cpi": {
         "label": "CPI Inflation (YoY)",
-        "source": "fred", "series": "CPIAUCSL",
+        "source": "fred", "series": "CPIAUCSL", "yoy": True,
         "category": "Macro Environment",
         "desc": "Consumer Price Index year-over-year change. High inflation forces the Fed to keep rates high, compressing stock multiples.",
         "thresholds": [
@@ -82,6 +96,20 @@ INDICATORS = {
             (5,   999, "red",    "High inflation — expect continued rate pressure"),
         ],
         "invest_signal": "Inflation falling toward 2% = green light for Fed cuts = multiple expansion for growth stocks.",
+        "format": "pct_yoy",
+    },
+    "core_cpi": {
+        "label": "Core CPI (YoY, ex Food/Energy)",
+        "source": "fred", "series": "CPILFESL", "yoy": True,
+        "category": "Macro Environment",
+        "desc": "CPI excluding volatile food and energy prices — the Fed's real inflation-trend gauge, since headline CPI can swing on gas prices alone. What the Fed actually watches when deciding on rates.",
+        "thresholds": [
+            (0,   2.5, "green",  "On target — supports a Fed pivot toward cuts"),
+            (2.5, 3.2, "yellow", "Sticky — Fed stays cautious even if headline CPI looks better"),
+            (3.2, 4.5, "yellow", "Elevated core — underlying inflation not resolved"),
+            (4.5, 999, "red",    "High core inflation — Fed pressured to stay restrictive regardless of headline"),
+        ],
+        "invest_signal": "When core CPI diverges from headline CPI (e.g. headline falling on cheap gas, core still sticky), core is the one that actually moves the Fed.",
         "format": "pct_yoy",
     },
     "unemployment": {
@@ -232,10 +260,27 @@ def _fetch_yield_curve_yf() -> dict:
         return {"value": None, "error": f"yfinance fallback failed: {e}"}
 
 
+def _fetch_yield_10y_yf() -> dict:
+    """10Y yield via yfinance ^TNX when FRED key is missing — same source
+    already used for the yield-curve approximation, just not divided
+    against a second maturity."""
+    try:
+        t10 = yf.Ticker("^TNX").history(period="5d", interval="1d")
+        if t10.empty:
+            return {"value": None, "error": "yfinance yield data unavailable"}
+        tnx = float(t10["Close"].dropna().iloc[-1]) / 10
+        return {"value": round(tnx, 3), "approx": True,
+                "note": "≈ yfinance ^TNX (FRED key missing)"}
+    except Exception as e:
+        return {"value": None, "error": f"yfinance fallback failed: {e}"}
+
+
 def _fetch_fred(cfg: dict) -> dict:
-    # Yield curve fallback via yfinance when FRED key is missing
+    # yfinance fallbacks when FRED key is missing
     if not FRED_API_KEY and cfg["series"] == "T10Y2Y":
         return _fetch_yield_curve_yf()
+    if not FRED_API_KEY and cfg["series"] == "DGS10":
+        return _fetch_yield_10y_yf()
 
     if not FRED_API_KEY:
         return {"value": None, "error": "Add FRED_API_KEY to .env for this indicator (free at fred.stlouisfed.org)"}
@@ -257,8 +302,10 @@ def _fetch_fred(cfg: dict) -> dict:
     latest_val = float(obs[0]["value"])
     extra = {}
 
-    # CPI: compute YoY
-    if cfg["series"] == "CPIAUCSL":
+    # YoY series (CPI, Core CPI, ...) — flagged per-indicator via "yoy": True
+    # rather than hardcoding series IDs, so adding another YoY series later
+    # is a config entry, not a code change.
+    if cfg.get("yoy"):
         params2 = {**params, "limit": 15}
         r2 = requests.get(FRED_BASE, params=params2, timeout=8)
         obs2 = [o for o in r2.json().get("observations", []) if o["value"] != "."]
@@ -334,6 +381,90 @@ def compute_composite(data: dict) -> dict:
         "recommendation": recommendation,
         "signals": signals,
     }
+
+
+def _narrative_snapshot(data: dict, composite: dict) -> str:
+    """Canonical JSON snapshot of the current readings — passed to
+    macro_narrative() as a single hashable string so st.cache_data keys on
+    the actual DATA (regenerate when readings change) rather than on
+    nothing (which would cache-and-never-refresh) or on unstable dict
+    identity (which would defeat caching entirely)."""
+    rows = []
+    for key, sig in composite["signals"].items():
+        ind = INDICATORS[key]
+        rows.append({
+            "label": ind["label"], "category": ind["category"],
+            "value": sig.get("display", "N/A"), "read": sig.get("label", ""),
+            "color": sig.get("color", "gray"),
+        })
+    return json.dumps({
+        "composite_score": composite["score"], "composite_label": composite["label"],
+        "indicators": rows,
+    }, sort_keys=True)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def macro_narrative(snapshot_json: str) -> dict:
+    """
+    Dynamic 'what does this combination actually mean' read — the static
+    per-indicator invest_signal strings above are always true in isolation,
+    but don't say where money is rotating TO given how these specific
+    readings combine RIGHT NOW (e.g. rising yields + strong dollar + sticky
+    core CPI reads very differently from rising yields + weak dollar +
+    falling core CPI, even though both have 'rising yields'). Same
+    Claude-narrates-the-numbers pattern as modules/macro_geo.py, generalized
+    from one stock to the whole market.
+    """
+    if not ANTHROPIC_API_KEY:
+        return {
+            "error": "Add ANTHROPIC_API_KEY to enable the dynamic macro narrative — "
+                     "the indicator cards above still work without it."
+        }
+
+    snapshot = json.loads(snapshot_json)
+    rows_txt = "\n".join(
+        f"- {r['label']} ({r['category']}): {r['value']} — {r['read']} [{r['color']}]"
+        for r in snapshot["indicators"]
+    )
+
+    prompt = f"""You are a senior macro strategist explaining, in plain terms, what TODAY's specific combination of indicator readings means for where money is flowing across asset classes and equity sectors — not a generic explainer of what each indicator means in isolation.
+
+CURRENT READINGS:
+{rows_txt}
+
+Composite market health: {snapshot['composite_score']}/100 — {snapshot['composite_label']}
+
+Reason about how these readings interact (e.g. rate direction + dollar direction + inflation trend together, not each alone). Be specific about equity sectors/styles (growth vs value, cyclicals vs defensives, duration-sensitive vs cash-generative, US vs international, commodities/gold) and WHY, given the actual combination above — not boilerplate that would apply to any macro backdrop.
+IMPORTANT: Always respond in English regardless of any context language.
+
+Respond ONLY with valid JSON (no markdown fences):
+{{
+  "headline": "<one sentence: the core money-flow story right now>",
+  "narrative": "<3-4 sentences connecting the specific readings above into one coherent story>",
+  "money_flowing_into": ["<asset class or style 1>", "<asset class or style 2>"],
+  "money_flowing_out_of": ["<asset class or style 1>", "<asset class or style 2>"],
+  "sectors_favored": ["<sector 1>", "<sector 2>"],
+  "sectors_at_risk": ["<sector 1>", "<sector 2>"],
+  "watch_for": "<the one thing that would change this read if it shifted>"
+}}"""
+
+    try:
+        msg = _get_client().messages.create(
+            model="claude-sonnet-5",
+            max_tokens=1200,
+            thinking={"type": "disabled"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        parsed = json.loads(raw)
+        parsed["error"] = None
+        return parsed
+    except Exception as e:
+        return {"error": f"Macro narrative unavailable: {e}"}
 
 
 def _fmt(key: str, val: float | None) -> str:

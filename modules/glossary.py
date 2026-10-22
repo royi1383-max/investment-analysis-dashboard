@@ -10,9 +10,8 @@ Every entry is a plain-language explanation with the practical "so what".
 
 TIP: dict[str, str] = {
     # ── Valuation ────────────────────────────────────────────────────────────
-    "forward_pe": "Forward P/E: price ÷ NEXT year's expected earnings. What you pay for $1 of future profit. High-growth stocks justify higher P/E — always judge vs. growth rate and sector, not in isolation.",
-    "ps": "Price/Sales: market cap ÷ annual revenue. The go-to for unprofitable growth companies. Software can sustain 10x+; retail rarely above 2x.",
-    "peg": "PEG: P/E ÷ growth rate. Under ~1.5 = paying a fair price for the growth. Over 3 = growth already fully priced in.",
+    # forward_pe / ps / peg live in app.py's _TIP/_EXPLAIN (already wired
+    # everywhere) — not duplicated here to avoid drifting thresholds.
     "ev_ebitda": "EV/EBITDA: company value (incl. debt) ÷ operating cash profit. Better than P/E for comparing companies with different debt loads.",
     "dcf": "DCF (Discounted Cash Flow): today's value of all future cash the business will generate. The output is only as good as the growth and discount assumptions — that's why the sensitivity table matters.",
     "wacc": "WACC / discount rate: the annual return investors demand for holding this company's risk. Higher risk (beta) → higher WACC → lower present value of future cash.",
@@ -20,24 +19,23 @@ TIP: dict[str, str] = {
     "intrinsic_value": "Intrinsic Value: what the business is 'really' worth per share by DCF math, vs. what the market charges today. A margin of safety = buying well below it.",
 
     # ── Profitability / quality ──────────────────────────────────────────────
-    "gross_margin": "Gross Margin: % of revenue left after direct costs. Software: 70-90%. Hardware: 30-50%. Retail: 20-35%. Falling gross margin = pricing power eroding.",
+    # gross_margin lives in app.py's _TIP/_EXPLAIN — not duplicated here.
     "profit_margin": "Net Margin: % of revenue that becomes actual profit. Compare within the sector — 5% is great for a grocer, weak for software.",
     "roe": "ROE: profit generated per $1 of shareholders' equity. Above 15-20% consistently = a quality compounder. Beware: high debt inflates ROE artificially.",
     "fcf": "Free Cash Flow: real cash left after running AND investing in the business. Harder to fake than accounting earnings — 'profit is an opinion, cash is a fact'.",
     "ocf_ni": "Cash Backing (OCF/NI): operating cash flow ÷ net income. Near or above 1 = earnings are real cash. Well below 1 = paper profits built on accruals — a classic red flag.",
     "sbc": "Stock-Based Compensation: paying employees in shares. Doesn't burn cash but silently dilutes you. Over ~10% of revenue = your ownership shrinks meaningfully every year.",
     "dilution": "Dilution: the company issuing new shares, shrinking your slice of the pie. Share count growing 4%+/yr means the business must grow that much just to keep your per-share value flat.",
-    "rule_of_40": "Rule of 40: revenue growth % + profit margin % ≥ 40 = a healthy growth company. A SaaS growing 50% losing 5% passes; growing 10% losing 20% fails.",
+    # rule_of_40 lives in app.py's _TIP/_EXPLAIN — not duplicated here.
 
     # ── Technical ────────────────────────────────────────────────────────────
-    "rsi": "RSI (0-100): momentum speedometer. Above 70 = overbought (stretched, pullback risk). Below 30 = oversold (potential bounce). In strong uptrends RSI can stay 60-80 for months — overbought ≠ sell.",
-    "macd": "MACD: trend-momentum gauge from two moving averages. MACD line above its signal line = bullish momentum; crossing below = momentum fading.",
+    # rsi / macd live in app.py's _TIP/_EXPLAIN — not duplicated here.
     "ma200": "200-day Moving Average: the long-term trend line. Price above a rising MA200 = healthy uptrend. Institutions watch it — breaks below often trigger selling.",
     "ma50": "50-day Moving Average: the medium-term trend. In strong stocks, pullbacks to the MA50 that hold are classic add points.",
     "atr": "ATR (Average True Range): how many $ the stock moves on a typical day. The building block for stop placement — a stop inside 1 ATR will get hit by pure noise.",
     "bollinger": "Bollinger Bands: volatility envelope around the 20-day average. A tight squeeze = energy building for a big move; walking the upper band = strong trend.",
     "golden_cross": "Golden Cross: MA50 crossing above MA200 — long-term trend turning up. Death Cross = the reverse.",
-    "breakout": "Breakout: price clearing a resistance level (e.g. a 20d/55d high) on volume. The Turtle system buys these mechanically — trends often start here.",
+    # breakout lives in app.py's _TIP/_EXPLAIN — not duplicated here.
     "rs_line": "Relative Strength vs SPY: the stock's return minus the index's. Positive RS in a falling market = institutions defending the name — a leadership tell.",
 
     # ── Risk / portfolio ─────────────────────────────────────────────────────
@@ -74,10 +72,9 @@ TIP: dict[str, str] = {
     "13f": "13F: quarterly SEC filing where big funds disclose holdings — 45 days late. Useful for ideas and conviction signals, useless for timing.",
     "mspr": "MSPR (-100..+100): monthly insider buy/sell balance. Insiders sell for many reasons but BUY for only one — clusters of buying are the strongest legal signal.",
     "insider": "Insider Transactions: executives trading their own stock. One sale = noise (taxes, diversification). Multiple executives buying together = they see something.",
-    "short_interest": "Short Interest: % of shares bet AGAINST the stock. Over 15-20% = heavy skepticism — and squeeze fuel if good news forces shorts to buy back.",
+    # short_interest / institutional_ownership / smart_money live in app.py's
+    # _TIP/_EXPLAIN — not duplicated here (their thresholds used to drift).
     "call_put_ratio": "Call/Put Ratio: options bets up vs down. Above ~1.3 = unusually bullish positioning; typical market runs 0.7-0.9 (put hedging is normal).",
-    "institutional_ownership": "Institutional Ownership: % held by funds. 60-90% = validated but well-discovered. Very low = either undiscovered or avoided for a reason.",
-    "smart_money": "Smart Money: what informed investors (funds, insiders) DO with money, vs. what commentators say. Filings and flows over opinions.",
 
     # ── Strategy / trading ───────────────────────────────────────────────────
     "alpha": "Alpha: return above what the market gave you. Beating SPY by picking = alpha; riding a rising market = beta. Most funds fail to sustain alpha — respect how hard it is.",
@@ -98,7 +95,7 @@ TIP: dict[str, str] = {
     "backtest": "Backtest: running a strategy on past data. Beware: the past is one sample — overfit parameters look brilliant historically and fail live. Test on different periods.",
 
     # ── Scanning / scoring ───────────────────────────────────────────────────
-    "rvol": "Relative Volume: today's volume vs the 20-day average. Above 1.5x = unusual interest (institutions moving); breakouts on high RVOL are far more reliable than quiet ones.",
+    # rvol lives in app.py's _TIP/_EXPLAIN — not duplicated here.
     "rs": "Relative Strength vs SPY: the stock/sector return minus the index's over the same window. Positive = leadership; institutions hide in the names that fall least and rally most.",
     "momentum_dir": "Momentum Direction (↑→↓): whether 1-month relative strength is accelerating or fading vs the 3-month baseline. ↑ = money rotating IN now; ↓ = leadership fading.",
     "weekly_score": "Weekly Score: composite of 5 pillars — model (fundamentals+technicals), analysts, options flow, breakout setup, momentum bonus. Built to surface stocks in BUYABLE condition now, not just good companies.",
@@ -135,6 +132,17 @@ TIP: dict[str, str] = {
     "falling_knife": "Falling Knife: a stock dropping fast where the FUNDAMENTALS are breaking too. 'It's cheap' is the bait; deteriorating business is the hook. Distinguish from 'on sale': check whether margins/ROE/F-Score are holding while the price falls. Never average down before that check.",
     "analyst_grades": "Rating-action momentum (not just where ratings STAND, but where they're MOVING): counts upgrades/downgrades/new-coverage over 90 days. A cluster of upgrades often front-runs price strength as institutions reposition; a cluster of downgrades often confirms weakness before the stock 'admits' it. More informative than a single static consensus label.",
     "congress_trading": "Members of Congress must disclose stock trades within 45 days (STOCK Act, 2012). The free feed here shows the 25 most recent market-wide disclosures — a rolling snapshot, not a comprehensive per-symbol history. Useful for spotting when the SAME symbol appears across multiple lawmakers' filings; not a timing tool given the disclosure lag.",
+    "oshaughnessy_method": "James O'Shaughnessy ('What Works on Wall Street'): backtested thousands of factor combos across 50+ years; Cornerstone Growth demands PROVEN growth (positive quarterly EPS and sales growth) that is still cheap on sales (P/S<1.5) AND confirmed by the tape (beats the market over 12M) — growth without price confirmation is a story, not a screen pass. Source: RN SB — Markets & Trading, 'CANSLIM, O'Shaughnessy, Kirkpatrick, and Value Line: Converging Systems Built on Relative Price Strength.'",
+    "kirkpatrick_method": "Kirkpatrick & Dahlquist ('Technical Analysis: The Complete Resource'): relative strength isn't one number — it's a blend of how a stock has performed across multiple windows (here: 3M/6M/12M vs SPY, recent-weighted). The composite score approximates a percentile rank; scanning a universe (Alpha Lab's Consensus Scanner) turns that into a TRUE rank instead of a single-stock heuristic. Source: RN SB — Markets & Trading, same relative-strength-systems note as O'Shaughnessy/CANSLIM.",
+    "risk_of_ruin_method": "Risk of Ruin answers the question position-sizing rules dodge: given your real win rate and payoff ratio, what's the probability you blow through a defined drawdown before the edge plays out? Classic (even-money) formula from gambling/trading theory; the Vince variant adjusts for asymmetric payoffs. Source: RN SB — Markets & Trading / Technical Analysis & Trading Systems, Risk-of-Ruin and Kelly/Optimal-f cluster.",
+    "murphy_method": "John Murphy's money-management discipline (from 'Technical Analysis of the Financial Markets'): the checklist most traders skip because it's not about picking direction — it's about surviving being wrong often enough that the edge has time to compound. A blown-up account with great picks still ends the game. Source: RN SB — Markets & Trading / Technical Analysis & Trading Systems, Money Management / Trading System Design Checklist notes.",
+    "trading_psychology_method": "A pre/post-trade bias self-check distilled from behavioral-finance research (Andrew Lo's Adaptive Markets, Malkiel's A Random Walk Down Wall Street): loss aversion and the rogue-trader doubling-down pattern, herding, performance-chasing, IPO/hot-tip red flags, dopamine-driven overconfidence after wins, fear-driven panic decisions, hyperbolic discounting, probability matching, revenge trading, and self-attribution bias. Every 'no' answer is a bias actively showing up in this decision, not a moral judgment — the point is to catch it before it costs money. Source: RN SB — Markets & Trading / Efficient Markets vs Behavioral & Adaptive Finance.",
+    "bsm_method": "Black-Scholes-Merton (1973): the closed-form formula for a European option's fair value, derived from a no-arbitrage argument (a continuously-rebalanced stock+bond portfolio can replicate the option's payoff exactly). Inputs: spot, strike, time to expiry, risk-free rate, volatility. Assumes constant volatility and log-normal returns — real markets have a volatility 'smile' the model misses. Source: RN SB — Data & Business Intelligence / Python for Finance - Quantitative Analytics.",
+    "binomial_method": "Cox-Ross-Rubinstein (1979) binomial tree: builds the option's value by stepping backward through a lattice of up/down price moves, taking the risk-neutral expected value at each node. Converges to Black-Scholes as steps→∞, but unlike BSM it naturally handles AMERICAN options (early exercise checked at every node) — which is why American puts, priced here via binomial, are worth more than the European BSM price. Source: RN SB — Python for Finance - Quantitative Analytics.",
+    "monte_carlo_options_method": "Monte Carlo option pricing: simulate thousands of random price paths under the risk-neutral measure, average the discounted payoffs. Antithetic variates (pairing each random shock with its mirror image) cancel out sampling noise and roughly halve the standard error for the same number of paths — a free variance-reduction trick, no extra simulation cost. Source: RN SB — Python for Finance - Quantitative Analytics.",
+    "implied_vol_method": "Implied volatility: instead of feeding in a volatility to get a price, feed in the MARKET's actual price and solve backward for the sigma that reproduces it (via Brent's root-finding method here). This is what options markets actually quote — comparing it to REALIZED (historical) volatility tells you whether options are pricing in more or less future turbulence than the stock has recently shown.",
+    "efficient_frontier_method": "Markowitz mean-variance optimization (1952): for any target risk level, there's one combination of assets that maximizes expected return — plotting all of them traces the 'efficient frontier.' The max-Sharpe (tangency) portfolio is the single best risk-adjusted mix; min-volatility is the calmest possible mix. Long-only here (no shorting/leverage), matching a retail account. Source: RN SB — Python for Finance - Quantitative Analytics.",
+    "pca_method": "Principal Component Analysis on a return matrix: finds the combinations of stocks that explain the most shared variance. PC1 is almost always a 'market factor' — how much of the universe just moves together vs. each stock's own idiosyncratic behavior. A high PC1 % means the 'diversified' portfolio is really one big correlated bet; a low PC1 % means there's real diversification on the table. Source: RN SB — Python for Finance - Quantitative Analytics.",
 }
 
 

@@ -6,7 +6,6 @@ Supports two CSV formats:
 """
 import io
 import pandas as pd
-import numpy as np
 import streamlit as st
 from utils.cache import get_ticker_info, get_price_history
 from modules import scoring, fundamental, technical, momentum as mom_module

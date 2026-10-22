@@ -3,7 +3,6 @@ Portfolio Health Check — scores each position and uses Claude
 to give actionable recommendations: trim, add, exit, add exposure.
 """
 import json
-import anthropic
 import pandas as pd
 import streamlit as st
 from config import ANTHROPIC_API_KEY

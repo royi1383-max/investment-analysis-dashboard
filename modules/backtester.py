@@ -6,15 +6,29 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import date
 
 STRATEGIES: dict[str, dict] = {
-    "SMA Crossover":   {"fast": 20,  "slow": 50},
-    "EMA Crossover":   {"fast": 12,  "slow": 26},
-    "RSI Reversal":    {"period": 14, "oversold": 30, "overbought": 70},
-    "MACD":            {"fast": 12,  "slow": 26, "signal": 9},
-    "Bollinger Bands": {"period": 20, "std_dev": 2.0},
-    "Momentum":        {"period": 20},
+    "SMA Crossover":       {"fast": 20,  "slow": 50},
+    "EMA Crossover":       {"fast": 12,  "slow": 26},
+    "RSI Reversal":        {"period": 14, "oversold": 30, "overbought": 70},
+    "MACD":                {"fast": 12,  "slow": 26, "signal": 9},
+    "Bollinger Bands":     {"period": 20, "std_dev": 2.0},
+    "Momentum":            {"period": 20},
+    "Technical Consensus": {},
+}
+
+# Small parameter grids searched on the TRAIN window only, for walk-forward
+# out-of-sample validation (run_backtest_walkforward). Never search on test data.
+_PARAM_GRID: dict[str, list[dict]] = {
+    "SMA Crossover":       [{"fast": 10, "slow": 30}, {"fast": 20, "slow": 50}, {"fast": 30, "slow": 100}],
+    "EMA Crossover":       [{"fast": 8,  "slow": 21}, {"fast": 12, "slow": 26}, {"fast": 19, "slow": 39}],
+    "RSI Reversal":        [{"period": 14, "oversold": 30, "overbought": 70},
+                            {"period": 14, "oversold": 25, "overbought": 75},
+                            {"period": 21, "oversold": 30, "overbought": 70}],
+    "MACD":                [{"fast": 12, "slow": 26, "signal": 9}, {"fast": 8, "slow": 17, "signal": 9}],
+    "Bollinger Bands":     [{"period": 20, "std_dev": 2.0}, {"period": 20, "std_dev": 2.5}, {"period": 10, "std_dev": 1.5}],
+    "Momentum":            [{"period": 10}, {"period": 20}, {"period": 60}],
+    "Technical Consensus": [{}],
 }
 
 
@@ -96,18 +110,95 @@ def _momentum_signals(close: pd.Series, period: int) -> pd.Series:
     return signal
 
 
+def _technical_consensus_signals(close: pd.Series) -> pd.Series:
+    """Equal-weighted majority vote across Turtle breakout, MA/12-1
+    trend-following, a Minervini-style trend template, and 20d momentum —
+    the same 'every method counts once' philosophy as
+    fund_models.combined_verdict(), but computed causally bar-by-bar (every
+    rolling window only ever looks at past + current data) so it can be
+    walk-forward tested without look-ahead bias."""
+    n = len(close)
+    signal = pd.Series(0, index=close.index)
+    if n < 260:
+        return signal
+
+    # Turtle: long while price stays inside the 20d-high/10d-low channel of PRIOR bars.
+    prev_hi20 = close.shift(1).rolling(20).max()
+    prev_lo10 = close.shift(1).rolling(10).min()
+    turtle_on = pd.Series(False, index=close.index)
+    in_pos = False
+    for i in range(n):
+        hi, lo = prev_hi20.iloc[i], prev_lo10.iloc[i]
+        if pd.isna(hi) or pd.isna(lo):
+            continue
+        if not in_pos and close.iloc[i] > hi:
+            in_pos = True
+        elif in_pos and close.iloc[i] < lo:
+            in_pos = False
+        turtle_on.iloc[i] = in_pos
+
+    ma50  = close.rolling(50).mean()
+    ma150 = close.rolling(150).mean()
+    ma200 = close.rolling(200).mean()
+    mom_12_1 = close.shift(21) / close.shift(252) - 1   # 12-1 momentum, causal
+    trend_bull = (close > ma200) & (ma50 > ma200) & (mom_12_1 > 0)
+    trend_bear = (close < ma200) & (ma50 < ma200) & (mom_12_1 < 0)
+
+    hi52 = close.rolling(252).max()
+    lo52 = close.rolling(252).min()
+    minervini_bull = ((close > ma150) & (close > ma200) & (ma150 > ma200) &
+                      (close > ma50) & (close >= lo52 * 1.30) & (close >= hi52 * 0.75))
+
+    mom20 = close / close.shift(20) - 1
+    mom_bull = mom20 > 0
+    mom_bear = mom20 < 0
+
+    n_bull = turtle_on.astype(int) + trend_bull.astype(int) + minervini_bull.astype(int) + mom_bull.astype(int)
+    n_bear = trend_bear.astype(int) + mom_bear.astype(int)
+    signal[n_bull >= 3] = 1
+    signal[(n_bull < 3) & (n_bear >= 2)] = -1
+    return signal
+
+
+def _signal_for(strategy: str, close: pd.Series, p: dict) -> pd.Series:
+    """Dispatch to the right signal generator. Shared by run_backtest and
+    run_backtest_walkforward so both use identical signal logic."""
+    if strategy == "SMA Crossover":
+        return _sma_signals(close, int(p["fast"]), int(p["slow"]))
+    if strategy == "EMA Crossover":
+        return _ema_signals(close, int(p["fast"]), int(p["slow"]))
+    if strategy == "RSI Reversal":
+        return _rsi_signals(close, int(p["period"]), float(p["oversold"]), float(p["overbought"]))
+    if strategy == "MACD":
+        return _macd_signals(close, int(p["fast"]), int(p["slow"]), int(p["signal"]))
+    if strategy == "Bollinger Bands":
+        return _bb_signals(close, int(p["period"]), float(p["std_dev"]))
+    if strategy == "Momentum":
+        return _momentum_signals(close, int(p["period"]))
+    if strategy == "Technical Consensus":
+        return _technical_consensus_signals(close)
+    raise ValueError(f"Unknown strategy: {strategy}")
+
+
 # ── Metrics ──────────────────────────────────────────────────────────────────
+
+# Below this, a "vol" is floating-point noise from std() of a (near-)constant
+# series (e.g. all-zero returns when a strategy never triggers a signal) —
+# not real variance. Guards against Sharpe/Sortino exploding to absurd
+# values like 1e17 on a flat/no-trade period.
+_MIN_MEANINGFUL_STD = 1e-10
+
 
 def _sharpe(daily_ret: pd.Series, risk_free: float = 0.05) -> float:
     excess = daily_ret - risk_free / 252
     std = excess.std()
-    return float(excess.mean() / std * np.sqrt(252)) if std > 0 else 0.0
+    return float(excess.mean() / std * np.sqrt(252)) if std > _MIN_MEANINGFUL_STD else 0.0
 
 
 def _sortino(daily_ret: pd.Series, risk_free: float = 0.05) -> float:
     downside_std = daily_ret[daily_ret < 0].std() * np.sqrt(252)
     ann_ret = daily_ret.mean() * 252 - risk_free
-    return float(ann_ret / downside_std) if downside_std > 0 else 0.0
+    return float(ann_ret / downside_std) if downside_std > _MIN_MEANINGFUL_STD else 0.0
 
 
 def _max_drawdown(equity: pd.Series) -> float:
@@ -188,20 +279,7 @@ def run_backtest(
     p = {**(STRATEGIES.get(strategy, {})), **(params or {})}
 
     try:
-        if strategy == "SMA Crossover":
-            raw_signal = _sma_signals(close, int(p["fast"]), int(p["slow"]))
-        elif strategy == "EMA Crossover":
-            raw_signal = _ema_signals(close, int(p["fast"]), int(p["slow"]))
-        elif strategy == "RSI Reversal":
-            raw_signal = _rsi_signals(close, int(p["period"]), float(p["oversold"]), float(p["overbought"]))
-        elif strategy == "MACD":
-            raw_signal = _macd_signals(close, int(p["fast"]), int(p["slow"]), int(p["signal"]))
-        elif strategy == "Bollinger Bands":
-            raw_signal = _bb_signals(close, int(p["period"]), float(p["std_dev"]))
-        elif strategy == "Momentum":
-            raw_signal = _momentum_signals(close, int(p["period"]))
-        else:
-            return error_result(f"Unknown strategy: {strategy}")
+        raw_signal = _signal_for(strategy, close, p)
     except Exception as e:
         return error_result(f"Signal generation failed: {e}")
 
@@ -241,4 +319,105 @@ def run_backtest(
         "profit_factor":     profit_factor,
         "volatility":        volatility,
         "error":             None,
+    }
+
+
+# ── Walk-forward validation ───────────────────────────────────────────────────
+
+def _segment_metrics(close: pd.Series, raw_signal: pd.Series, seg_index: pd.Index, capital: float) -> dict:
+    seg_ret = close.pct_change(fill_method=None).fillna(0).reindex(seg_index)
+    seg_sig = raw_signal.shift(1).fillna(0).reindex(seg_index).fillna(0)
+    strat_ret = seg_sig * seg_ret
+    equity = (1 + strat_ret).cumprod() * capital
+    bm     = (1 + seg_ret).cumprod() * capital
+    active = strat_ret[strat_ret != 0]
+    return {
+        "total_return":     float(equity.iloc[-1] / capital - 1) if len(equity) else 0.0,
+        "benchmark_return": float(bm.iloc[-1] / capital - 1) if len(bm) else 0.0,
+        "sharpe":           _sharpe(strat_ret),
+        "sortino":          _sortino(strat_ret),
+        "max_drawdown":     _max_drawdown(equity),
+        "win_rate":         float((active > 0).sum() / len(active)) if len(active) else 0.0,
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_backtest_walkforward(
+    symbol: str,
+    strategy: str,
+    period: str = "3y",
+    capital: float = 10_000,
+    params: dict | None = None,
+    train_frac: float = 0.7,
+) -> dict:
+    """
+    Walk-forward validation: pick the best parameter set on the TRAIN window
+    only (by in-sample Sharpe), then evaluate that SAME frozen parameter set
+    on the TEST window it never saw. Reports both, plus a robustness verdict.
+
+    This is the honest way to check whether a technical strategy (or the
+    'Technical Consensus' composite) has real out-of-sample edge, vs. just
+    fitting noise — the discipline RN SB's own backtest-methodology notes
+    ('Ten Performance Criteria', walk-forward/out-of-sample testing) insist on.
+
+    NOTE: this only works for strategies built purely from PRICE history.
+    Fundamental-based checklists (Buffett, Piotroski, Graham, ...) cannot be
+    walk-forward tested this way — yfinance only exposes CURRENT fundamentals,
+    not point-in-time historical snapshots, so any attempt would have
+    look-ahead bias baked in. Use score_validation.py's live forward-tracking
+    for those instead.
+    """
+    try:
+        tk   = yf.Ticker(symbol.upper())
+        hist = tk.history(period=period, interval="1d")
+        if hist.empty or len(hist) < 120:
+            return {"error": f"Not enough data for {symbol} ({period}). Try a longer period."}
+        close = hist["Close"].squeeze().dropna()
+    except Exception as e:
+        return {"error": f"Failed to fetch data for {symbol}: {e}"}
+
+    split_i = int(len(close) * train_frac)
+    if split_i < 60 or (len(close) - split_i) < 30:
+        return {"error": "Not enough data to split into meaningful train/test windows."}
+    train_idx, test_idx = close.index[:split_i], close.index[split_i:]
+
+    candidates = list(_PARAM_GRID.get(strategy, [params or {}]))
+    if params and params not in candidates:
+        candidates = [params] + candidates
+
+    best = None
+    for cand in candidates:
+        p = {**(STRATEGIES.get(strategy, {})), **cand}
+        try:
+            raw_signal = _signal_for(strategy, close, p)
+        except Exception:
+            continue
+        train_metrics = _segment_metrics(close, raw_signal, train_idx, capital)
+        if best is None or train_metrics["sharpe"] > best["train"]["sharpe"]:
+            best = {"params": cand, "train": train_metrics, "signal": raw_signal}
+
+    if best is None:
+        return {"error": "No valid parameter set produced a usable signal."}
+
+    test_metrics = _segment_metrics(close, best["signal"], test_idx, capital)
+    degradation  = best["train"]["sharpe"] - test_metrics["sharpe"]
+
+    if test_metrics["sharpe"] <= 0:
+        verdict = "OVERFIT WARNING — out-of-sample Sharpe is zero or negative; the in-sample edge did not survive."
+    elif test_metrics["sharpe"] >= best["train"]["sharpe"] * 0.5:
+        verdict = "ROBUST — out-of-sample Sharpe holds up reasonably close to in-sample; the edge looks real."
+    else:
+        verdict = "DEGRADED — out-of-sample Sharpe is well below in-sample; treat the strategy with caution."
+
+    return {
+        "symbol":             symbol.upper(),
+        "strategy":           strategy,
+        "chosen_params":      best["params"],
+        "train_period":       (str(train_idx[0].date()), str(train_idx[-1].date())),
+        "test_period":        (str(test_idx[0].date()), str(test_idx[-1].date())),
+        "in_sample":          best["train"],
+        "out_of_sample":      test_metrics,
+        "sharpe_degradation": round(degradation, 2),
+        "verdict":            verdict,
+        "error":              None,
     }

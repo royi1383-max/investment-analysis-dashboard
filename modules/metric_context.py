@@ -324,8 +324,8 @@ def ext200_in_context(close) -> dict | None:
                        f"{vol_ann:.0f}% volatility — trending, not parabolic.")
         if stretch > -0.5:
             return _mk(f"{ext:+.0f}%", band_s, "AT TREND", "info",
-                       f"Price sits near its MA200 — the long-term trend line is being "
-                       f"tested; direction of the break matters more than the level.")
+                       "Price sits near its MA200 — the long-term trend line is being "
+                       "tested; direction of the break matters more than the level.")
         return _mk(f"{ext:+.0f}%", band_s, "BELOW TREND", "warn",
                    f"{abs(ext):.0f}% below MA200 — the long-term trend is broken; "
                    f"cheapness alone is not a catalyst.")

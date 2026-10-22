@@ -10,9 +10,6 @@ Alert types:
 
 Alerts survive app restarts. Triggered alerts are deactivated and kept in history.
 """
-import json
-import numpy as np
-import pandas as pd
 import streamlit as st
 from pathlib import Path
 from datetime import datetime

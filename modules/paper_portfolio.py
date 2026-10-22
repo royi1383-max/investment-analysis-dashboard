@@ -18,14 +18,11 @@ import json
 import math
 import datetime
 import hashlib
-import numpy as np
 import pandas as pd
 import streamlit as st
 from pathlib import Path
-from typing import Any
 
-from config import ANTHROPIC_API_KEY
-from utils.cache import get_ticker_info, get_price_history
+from utils.cache import get_ticker_info
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 

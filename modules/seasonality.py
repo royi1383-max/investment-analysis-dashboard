@@ -4,8 +4,6 @@ Uses yfinance monthly history; cached 24h.
 """
 import streamlit as st
 import yfinance as yf
-import pandas as pd
-import numpy as np
 from datetime import date
 
 MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]

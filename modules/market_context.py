@@ -14,7 +14,6 @@ Signals used (all via yfinance, no API key needed):
   QQQ    — Nasdaq momentum
   ^IXIC  — Nasdaq composite
 """
-import numpy as np
 import streamlit as st
 from utils.cache import get_ticker_info, get_price_history
 

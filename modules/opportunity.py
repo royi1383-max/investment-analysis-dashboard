@@ -28,7 +28,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.cache import get_ticker_info, get_price_history
-from utils.indicators import rsi, rsi_last, trailing_return
+from utils.indicators import rsi, trailing_return
 
 
 # ─── Quality axis (momentum-free) ─────────────────────────────────────────────

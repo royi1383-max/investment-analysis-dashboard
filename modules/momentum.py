@@ -11,7 +11,8 @@ def _return(df: pd.DataFrame, days: int) -> float | None:
     close = df["Close"].squeeze()
     if len(close) < days + 1:
         return None
-    return float(close.iloc[-1] / close.iloc[-days] - 1)
+    ret = float(close.iloc[-1] / close.iloc[-days] - 1)
+    return None if np.isnan(ret) else ret
 
 
 def _score_return(ret):

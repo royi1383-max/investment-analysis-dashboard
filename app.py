@@ -1,10 +1,9 @@
 """
 Investment Analysis Dashboard
-Royi's growth-focused stock & ETF research tool.
+Growth-focused stock & ETF research tool.
 """
 import html as _html
 import json
-import os
 from pathlib import Path
 from datetime import datetime, date as _date
 import streamlit as st
@@ -17,6 +16,7 @@ from plotly.subplots import make_subplots
 
 from config import SCORE_LABELS, SCORE_WEIGHTS, RADAR_TICKERS, SECTOR_ETFS, ANTHROPIC_API_KEY, WEEKLY_UNIVERSE
 from utils.cache import get_ticker_info, get_price_history
+import utils.indicators as mod_ind
 import modules.fundamental  as mod_fund
 import modules.technical    as mod_tech
 import modules.momentum     as mod_mom
@@ -35,7 +35,6 @@ import modules.portfolio_health as mod_phealth
 import modules.weekly_picks     as mod_weekly
 import modules.sector_strength  as mod_sector_str
 import modules.earnings         as mod_earnings
-import modules.alerts           as mod_alerts
 import modules.risk_metrics     as mod_risk
 import modules.macro_impact     as mod_macro_impact
 import modules.etf_holdings     as mod_etf
@@ -57,6 +56,10 @@ import modules.briefing         as mod_brief
 import modules.opportunity      as mod_opp
 import modules.alpha_vantage    as mod_av
 import modules.fmp              as mod_fmp
+import modules.score_validation as mod_sv
+import modules.trading_psychology as mod_psych
+import modules.options_pricing   as mod_opt
+import modules.portfolio_optimizer as mod_popt
 from modules.historical import METRICS_CATALOG
 from config import FINNHUB_API_KEY
 
@@ -65,7 +68,7 @@ _WP_CACHE = Path(__file__).parent / ".wp_cache.json"
 _WP_MAX_AGE_HOURS = 12   # results expire after 12 hours
 
 
-from utils.persist import load_json as _load_json, save_json as _save_json, NumpyEncoder as _NumpyEncoder
+from utils.persist import load_json as _load_json, save_json as _save_json
 
 
 def _wp_save(output: dict) -> None:
@@ -142,6 +145,15 @@ section[data-testid="stSidebar"] {
   border-right: 1px solid var(--border) !important;
 }
 section[data-testid="stSidebar"] * { font-family: var(--sans) !important; }
+/* Icon-font elements (expander chevrons etc.) use ligature text that the
+   Material Icons font converts into a glyph — the blanket sans-serif rule
+   above breaks that conversion and the raw ligature text ("arrow_right")
+   renders literally, overlapping the label. Restore the icon font here. */
+section[data-testid="stSidebar"] [data-testid="stIconMaterial"],
+section[data-testid="stSidebar"] .material-icons,
+section[data-testid="stSidebar"] [class*="material-icons"] {
+  font-family: 'Material Icons' !important;
+}
 
 /* ── headings ── */
 h1, h2, h3, h4 { color: var(--text) !important; font-family: var(--sans) !important; font-weight: 700; }
@@ -227,6 +239,33 @@ h1, h2, h3, h4 { color: var(--text) !important; font-family: var(--sans) !import
 .mg-down { color: var(--down); }
 .mg-warn { color: var(--amber); }
 .mg-base { color: var(--text); }
+
+/* ── unified card system ──────────────────────────────────────────────────
+   Single source of truth for every card surface. Before this, cards were
+   hand-styled inline per tab: 3 different backgrounds, 2 border colors,
+   2 radii and ~6 padding combos — which read as visual noise when moving
+   between tabs. Use these classes instead of new inline card styles. */
+.ui-card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px 18px; margin-bottom: 12px;
+}
+.ui-card-accent { border-left-width: 4px; border-left-style: solid; }
+.ui-card-hero { border-width: 2px; border-radius: 12px; padding: 18px 22px; }
+.ui-card-title {
+  font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 4px;
+}
+.ui-card-sub { font-size: 12px; color: var(--dim); line-height: 1.6; }
+.ui-card-meta {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .8px; color: var(--mute); margin-bottom: 6px;
+}
+/* auto-fit card grid — cards keep a readable min width and reflow instead of
+   being squeezed into fixed equal columns. Equal heights come free from grid. */
+.ui-card-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px; margin-bottom: 12px;
+}
+.ui-card-grid > .ui-card { margin-bottom: 0; height: 100%; }
 
 /* verdict chip */
 .verdict {
@@ -524,6 +563,36 @@ def render_price_chart(df: pd.DataFrame, symbol: str):
         fig.add_trace(go.Scatter(x=df.index, y=df["MA200"], name="MA200",
                                   line=dict(color="#a78bfa", width=1.2)), row=1, col=1)
 
+    # ── Support/Resistance + trendlines — derived from the same swing-point
+    # detection, not hand-picked, so they're reproducible from this price
+    # series alone (see utils/indicators.py::support_resistance_levels /
+    # trendlines for the method: clustered swing highs/lows for horizontal
+    # levels, least-squares fit through the most recent swing points for
+    # the trend channel lines).
+    _sr = mod_ind.support_resistance_levels(df)
+    for _lvl in _sr.get("resistance", []):
+        fig.add_hline(y=_lvl, line_dash="dash", line_color="rgba(234,58,68,0.6)", line_width=1,
+                      annotation_text=f"R {_lvl:.2f}", annotation_position="right",
+                      annotation_font_color="#ea3a44", annotation_font_size=10,
+                      row=1, col=1)
+    for _lvl in _sr.get("support", []):
+        fig.add_hline(y=_lvl, line_dash="dash", line_color="rgba(22,199,132,0.6)", line_width=1,
+                      annotation_text=f"S {_lvl:.2f}", annotation_position="right",
+                      annotation_font_color="#16c784", annotation_font_size=10,
+                      row=1, col=1)
+
+    _tl = mod_ind.trendlines(df)
+    if _tl.get("support"):
+        fig.add_trace(go.Scatter(x=_tl["support"]["x"], y=_tl["support"]["y"],
+                                  name="Support trend", mode="lines",
+                                  line=dict(color="#16c784", width=1.5, dash="dot")),
+                     row=1, col=1)
+    if _tl.get("resistance"):
+        fig.add_trace(go.Scatter(x=_tl["resistance"]["x"], y=_tl["resistance"]["y"],
+                                  name="Resistance trend", mode="lines",
+                                  line=dict(color="#ea3a44", width=1.5, dash="dot")),
+                     row=1, col=1)
+
     colors = ["#16c784" if float(c) >= float(o) else "#ea3a44"
               for c, o in zip(df["Close"], df["Open"])]
     fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume",
@@ -653,54 +722,22 @@ with st.sidebar:
     st.title("📈 Stock Analyzer")
     st.markdown("---")
 
-    # Consume page_jump requests (e.g. "Set Alert" button from Earnings page)
+    # Consume page_jump requests (e.g. "Deep Dive →" button from Weekly Picks)
     if "page_jump" in st.session_state:
         st.session_state["_nav_page"] = st.session_state.pop("page_jump")
 
     page = st.radio(
         "Navigation",
         ["🔍 Analyze",
-         "⭐ Weekly Picks", "🔔 Alerts",
+         "⭐ Weekly Picks",
          "🏥 Market Health", "🔄 Sector Rotation", "📰 News Feed",
          "🔎 AI Screener", "🌍 Market Radar",
          "💼 Portfolio", "👁 Watchlist",
          "📝 Paper Portfolio", "🎯 Tracker",
-         "📊 Backtester"],
+         "📊 Backtester", "🧠 Alpha Lab", "📖 Glossary"],
         key="_nav_page",
         label_visibility="collapsed",
     )
-
-    # ── Active alert notifications in sidebar ──────────────────────────────
-    # Throttled: full network check at most once per 5 min per session,
-    # so page navigation isn't gated on per-alert price fetches.
-    st.markdown("---")
-    _now_ts = datetime.now().timestamp()
-    _last_check = st.session_state.get("_alerts_last_check", 0)
-    if _now_ts - _last_check > 300:
-        _triggered = mod_alerts.check_alerts()
-        st.session_state["_alerts_last_check"] = _now_ts
-        if _triggered:
-            st.session_state["_alerts_triggered_recent"] = _triggered
-        # Automatic earnings-soon check for watchlist + paper portfolio symbols
-        if FINNHUB_API_KEY:
-            _earn_events = mod_alerts.check_earnings_soon(days_ahead=7)
-            if _earn_events:
-                st.session_state["_earnings_soon_recent"] = _earn_events
-    _recent_triggered = st.session_state.get("_alerts_triggered_recent", [])
-    if _recent_triggered:
-        for _al in _recent_triggered:
-            _lbl = mod_alerts.ALERT_TYPES.get(_al["type"], _al["type"])
-            st.warning(
-                f"🔔 **{_al['symbol']}** — {_lbl} {_al['threshold']} "
-                f"(current: {_al.get('triggered_val','?')})"
-            )
-    for _ee in st.session_state.get("_earnings_soon_recent", []):
-        _when = "today" if _ee["days_until"] == 0 else f"in {_ee['days_until']}d"
-        _hr   = f" ({_ee['hour']})" if _ee.get("hour") else ""
-        st.info(f"📅 **{_ee['symbol']}** reports earnings {_when} — {_ee['date']}{_hr}")
-    _active_count = sum(1 for a in mod_alerts.load_alerts() if a.get("active"))
-    if _active_count:
-        st.caption(f"🔔 {_active_count} active alert{'s' if _active_count > 1 else ''}")
 
     st.markdown("---")
     if not ANTHROPIC_API_KEY:
@@ -896,6 +933,7 @@ if page == "🔍 Analyze":
             relative=p_data["score"],
         )
         st.session_state[f"scores_{symbol}"] = s_data
+        _pattern = mod_scoring.classify_pattern(s_data["breakdown"])
         # Record today's score for trend tracking (deterioration-before-price signal)
         mod_shist.record(symbol, s_data["final"], f_data["score"],
                          t_data["score"], mo_data["score"])
@@ -936,7 +974,7 @@ if page == "🔍 Analyze":
             expl = _EXPLAIN.get(label, "")
             tip  = _TIP.get(label, expl)
             return f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:9px;
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:9px;
             padding:14px 16px;min-width:0;cursor:help" title="{tip}">
   <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;text-transform:uppercase;
               letter-spacing:1px;color:#8a9bc2;margin-bottom:8px">{label}</div>
@@ -975,6 +1013,18 @@ if page == "🔍 Analyze":
   <span class="verdict {verdict_cls}">{s_data['label']}</span>
   <div style="font-size:11px;color:#8a9bc2;margin-top:10px;line-height:1.5">{sc_explain}</div>
 </div>""", unsafe_allow_html=True)
+            if _pattern["pattern"] != "MIXED — NO DOMINANT STORY":
+                st.markdown(
+                    f'<div style="background:{_pattern["color"]}14;border:1px solid '
+                    f'{_pattern["color"]}55;border-radius:9px;padding:10px 14px;margin-top:8px" '
+                    f'title="{_html.escape(_pattern["note"], quote=True)}">'
+                    f'<div style="font-size:10px;font-weight:700;color:{_pattern["color"]};'
+                    f'letter-spacing:.3px">{_pattern["icon"]} {_pattern["pattern"]}</div>'
+                    f'<div style="font-size:10.5px;color:#8a9bc2;margin-top:4px;line-height:1.4">'
+                    f'Quality (fund.+macro) {_pattern["quality"]} vs. Confirmation '
+                    f'(tech.+momentum) {_pattern["confirmation"]}</div>'
+                    f'</div>', unsafe_allow_html=True,
+                )
 
         with col_breakdown:
             cards_html = "".join(
@@ -993,7 +1043,7 @@ if page == "🔍 Analyze":
         if sc_ctx:
             st.markdown("#### 📊 Sector Context")
             lvl_cols = st.columns(3)
-            for i, key in enumerate(["level1", "level2", "level3"]):
+            for i, key in enumerate(["level1", "level2"]):
                 lvl = sc_ctx.get(key)
                 if not lvl:
                     continue
@@ -1001,7 +1051,7 @@ if page == "🔍 Analyze":
                     lbl = lvl["label"]
                     etf = lvl.get("etf")
                     st_data = lvl.get("strength", {})
-                    prefix = ["🏢 Sector", "📌 Sub-sector", "🔬 Niche"][i]
+                    prefix = ["🏢 Sector", "📌 Sub-sector"][i]
 
                     if st_data:
                         r1m_v = st_data.get("r1m", 0)
@@ -1010,7 +1060,7 @@ if page == "🔍 Analyze":
                         gc    = st_data.get("grade_color", "#8a9bc2")
                         a200  = "✅" if st_data.get("above_200") else "❌"
                         st.markdown(
-                            f'<div style="background:#1c2333;border:1px solid #2a3348;'
+                            f'<div style="background:var(--panel);border:1px solid var(--border);'
                             f'border-radius:8px;padding:12px 14px">'
                             f'<div style="font-size:9px;color:#556070;text-transform:uppercase;'
                             f'letter-spacing:.8px;margin-bottom:5px">{prefix}</div>'
@@ -1031,9 +1081,9 @@ if page == "🔍 Analyze":
                             unsafe_allow_html=True,
                         )
                     else:
-                        # Level 3 — no ETF, just label
+                        # ETF strength unavailable — just show the label
                         st.markdown(
-                            f'<div style="background:#1c2333;border:1px solid #2a3348;'
+                            f'<div style="background:var(--panel);border:1px solid var(--border);'
                             f'border-radius:8px;padding:12px 14px">'
                             f'<div style="font-size:9px;color:#556070;text-transform:uppercase;'
                             f'letter-spacing:.8px;margin-bottom:5px">{prefix}</div>'
@@ -1042,19 +1092,143 @@ if page == "🔍 Analyze":
                             unsafe_allow_html=True,
                         )
 
+            # Level 3 — niche tags. A LIST, not one label: a multi-thematic
+            # stock (e.g. a "Semiconductors" company that's really an
+            # optical/Ethernet connectivity play) gets every tag that fits
+            # instead of being force-fit into a single generic one.
+            _niches = sc_ctx.get("level3")
+            if _niches:
+                with lvl_cols[2]:
+                    _niche_chips = "".join(
+                        f'<span style="display:inline-block;background:#a78bfa18;'
+                        f'border:1px solid #a78bfa44;color:#a78bfa;font-size:11px;'
+                        f'font-weight:700;padding:3px 9px;border-radius:12px;'
+                        f'margin:0 4px 6px 0">{_n["label"]}</span>'
+                        for _n in _niches
+                    )
+                    st.markdown(
+                        f'<div style="background:var(--panel);border:1px solid var(--border);'
+                        f'border-radius:8px;padding:12px 14px">'
+                        f'<div style="font-size:9px;color:#556070;text-transform:uppercase;'
+                        f'letter-spacing:.8px;margin-bottom:7px">🔬 Niche Themes</div>'
+                        f'<div>{_niche_chips}</div>'
+                        f'<div style="font-size:9px;color:#556070;margin-top:6px">'
+                        f'From industry classification + business description — '
+                        f'descriptive, not a verified index/ETF weighting.</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+        # ── Risk Snapshot (compact — full interactive sizing/correlation/
+        # Risk-of-Ruin tools live in 🧠 Alpha Lab, not duplicated here) ────────
+        with st.expander("🛡 Risk Snapshot"):
+            _rs_c1, _rs_c2, _rs_c3 = st.columns(3)
+            with _rs_c1:
+                _rs_ti = mod_rt.get_trade_inputs(symbol)
+                _rs_plan = (mod_rt.trade_plan(_rs_ti["price"], _rs_ti["atr"], 50_000, 1.0)
+                           if not _rs_ti.get("error") and _rs_ti.get("atr") else {"error": "n/a"})
+                if _rs_plan.get("error"):
+                    st.caption("Position sizing unavailable (no ATR data).")
+                else:
+                    st.metric("Size @ 1% risk / $50k acct", f"{_rs_plan['shares']:,} sh",
+                             f"stop -{_rs_plan['stop_dist_pct']:.1f}%", delta_color="off",
+                             help="Van Tharp 1R method, 2×ATR stop, illustrative $50k account. "
+                                  "Custom sizing, Kelly, and Risk-of-Ruin live in Alpha Lab.")
+            with _rs_c2:
+                _rs_eq = mod_eq.analyze(symbol)
+                if _rs_eq.get("error") or not _rs_eq.get("checks"):
+                    st.caption("Earnings quality unavailable.")
+                else:
+                    _rs_flags = sum(1 for _, _st, _ in _rs_eq["checks"] if _st == "flag")
+                    st.metric("Earnings Quality",
+                             f"{_rs_eq['score']}/10" if _rs_eq.get("score") is not None else "—",
+                             f"{_rs_flags} red flag(s)" if _rs_flags else "clean",
+                             delta_color="inverse" if _rs_flags else "off",
+                             help="Full forensic checklist (dilution, SBC, cash-backing, "
+                                  "receivables, FCF conversion, debt trend) is in "
+                                  "Fundamentals + Earnings.")
+            with _rs_c3:
+                _rs_fit_src = []
+                try:
+                    for _rs_n, _rs_tp in mod_tp.load_all()["portfolios"].items():
+                        _rs_fit_src.append((f"Tracker: {_rs_n}",
+                                           tuple(sorted(_rs_tp["positions"].keys()))))
+                except Exception:
+                    pass
+                if not _rs_fit_src:
+                    st.caption("No tracked portfolio yet — build one in 🎯 Tracker to check fit.")
+                else:
+                    _rs_n0, _rs_syms0 = _rs_fit_src[0]
+                    _rs_fit = mod_rt.portfolio_fit(symbol, _rs_syms0)
+                    if _rs_fit.get("error") or _rs_fit.get("avg_corr") is None:
+                        st.caption("Portfolio fit unavailable.")
+                    else:
+                        st.metric(f"Fit vs {_rs_n0}", f"{_rs_fit['avg_corr']:.2f} avg corr",
+                                 _rs_fit["verdict"].split(" — ")[0],
+                                 delta_color="inverse" if "DUPLICATES" in _rs_fit["verdict"] else "off",
+                                 help=_rs_fit["verdict"])
+            st.caption("Interactive sizing, portfolio correlation/PCA, and Risk-of-Ruin tools "
+                      "live in 🧠 Alpha Lab — this is a glance, not the full workflow.")
+
         st.markdown("---")
 
         # ── Tabs ─────────────────────────────────────────────────────────────
-        tab_ov, tab_fund, tab_tech, tab_inst, tab_macro_peers, tab_experts, tab_seasonal, tab_13f, tab_dcf, tab_fm, tab_risk = st.tabs([
+        tab_ov, tab_fund, tab_tech, tab_inst, tab_macro_peers, tab_panel, tab_seasonal, tab_13f, tab_dcf = st.tabs([
             "📊 Overview", "💰 Fundamentals + Earnings", "📐 Technical + Momentum",
-            "🏦 Institutional + Analysts", "🌍 Macro + Peers + History", "🧠 Experts",
-            "📅 Seasonality", "🏛 13F Smart Money", "💎 DCF", "🏦 Fund Models", "🛡 Risk & Sizing",
+            "🏦 Institutional + Analysts", "🌍 Macro + Peers + History", "🧑‍⚖️ Experts & Models",
+            "📅 Seasonality", "🏛 13F Smart Money", "💎 DCF",
         ])
 
         # ── Overview ─────────────────────────────────────────────────────────
         with tab_ov:
             # ── 🎯 Opportunity Lens — quality vs condition, opportunity vs trap ──
             _opp = mod_opp.analyze(symbol)
+
+            # ── 📋 Bottom Line — one decisive stance + concrete action steps,
+            # synthesized from the Scanner Verdict, the quality-vs-confirmation
+            # pattern (see modules/scoring.py::classify_pattern), and the
+            # Opportunity Lens quadrant below. No LLM call — deterministic
+            # from numbers already computed on this page, so it's always
+            # available and reproducible.
+            if not _opp.get("error"):
+                _bl_sup = _bl_res = _bl_ma50 = None
+                try:
+                    _bl_df = t_data.get("df")
+                    if _bl_df is not None and not _bl_df.empty:
+                        _bl_levels = mod_ind.support_resistance_levels(_bl_df)
+                        _bl_sup = _bl_levels["support"][0] if _bl_levels["support"] else None
+                        _bl_res = _bl_levels["resistance"][0] if _bl_levels["resistance"] else None
+                        _bl_ma50v = _bl_df["Close"].squeeze().rolling(50).mean().iloc[-1]
+                        _bl_ma50 = float(_bl_ma50v) if pd.notna(_bl_ma50v) else None
+                except Exception:
+                    pass
+
+                _plan = mod_scoring.action_plan(
+                    score_label=s_data["label"], quadrant=_opp["quadrant"],
+                    pattern=_pattern["pattern"], current_price=price,
+                    nearest_support=_bl_sup, nearest_resistance=_bl_res, ma50=_bl_ma50,
+                )
+                _plan_steps_html = "".join(
+                    f'<div style="font-size:12.5px;color:#cdd6f4;margin-top:6px;'
+                    f'padding-left:14px;position:relative">'
+                    f'<span style="position:absolute;left:0;color:{_plan["color"]}">→</span>'
+                    f'{_html.escape(_step)}</div>'
+                    for _step in _plan["steps"]
+                )
+                st.markdown(
+                    f'<div style="background:{_plan["color"]}14;border:2px solid {_plan["color"]}60;'
+                    f'border-radius:12px;padding:16px 20px;margin-bottom:14px">'
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                    f'flex-wrap:wrap;gap:8px">'
+                    f'<span style="font-family:IBM Plex Mono,monospace;font-size:17px;'
+                    f'font-weight:800;color:{_plan["color"]}">📋 {_html.escape(_plan["action"])}</span>'
+                    f'<span style="font-size:11px;color:#8a9bc2">'
+                    f'Verdict {s_data["final"]}/10 {_html.escape(s_data["label"])} · '
+                    f'{_html.escape(_opp["quadrant"])} · {_pattern["icon"]} {_html.escape(_pattern["pattern"])}'
+                    f'</span></div>{_plan_steps_html}</div>',
+                    unsafe_allow_html=True,
+                )
+
             if not _opp.get("error"):
                 _opp_c = _opp["color"]
                 _dd_s = (f' · {_opp["drawdown"]:+.0f}% from 52w high'
@@ -1066,19 +1240,26 @@ if page == "🔍 Analyze":
                     for lbl, ok, det in _opp["signals"]
                 )
                 _q_tip = _html.escape(
-                    "Quality axis (momentum-free): " +
-                    "; ".join(f"{l}: {d}" for l, _, _, d in _opp["quality_parts"]),
+                    "QUALITY (momentum-free — is the business itself intact?):\n" +
+                    "\n".join(f"• {l}: {d}" for l, _, _, d in _opp["quality_parts"]),
+                    quote=True)
+                _c_tip = _html.escape(
+                    "CONDITION (price action — is the stock ACTING well right now?):\n"
+                    f"• {_opp.get('condition_detail', 'n/a')}\n"
+                    "Built from: price vs MA50, price vs MA200, 1-month return, 3-month return.",
                     quote=True)
                 st.markdown(
-                    f'<div style="background:#161b27;border:2px solid {_opp_c};border-radius:12px;'
+                    f'<div style="background:var(--panel);border:2px solid {_opp_c};border-radius:12px;'
                     f'padding:16px 20px;margin-bottom:14px">'
                     f'<div style="display:flex;justify-content:space-between;align-items:center;'
                     f'flex-wrap:wrap;gap:8px">'
                     f'<span style="font-family:IBM Plex Mono,monospace;font-size:18px;'
                     f'font-weight:800;color:{_opp_c}">🎯 {_html.escape(_opp["quadrant"])}</span>'
-                    f'<span style="font-size:12px;color:#8a9bc2;cursor:help" title="{_q_tip}">'
-                    f'Quality <b style="color:#e8edf8">{_opp["quality"]}/10</b> ⓘ · '
-                    f'Condition <b style="color:#e8edf8">{_opp["condition"]}/10</b>{_dd_s}</span>'
+                    f'<span style="font-size:12px;color:#8a9bc2">'
+                    f'<span style="cursor:help" title="{_q_tip}">Quality '
+                    f'<b style="color:#e8edf8">{_opp["quality"]}/10</b> ⓘ</span> · '
+                    f'<span style="cursor:help" title="{_c_tip}">Condition '
+                    f'<b style="color:#e8edf8">{_opp["condition"]}/10</b> ⓘ</span>{_dd_s}</span>'
                     f'</div>'
                     f'<div style="font-size:12.5px;color:#cdd6f4;margin-top:8px;line-height:1.6">'
                     f'{_html.escape(_opp["guidance"])}</div>'
@@ -1100,7 +1281,7 @@ if page == "🔍 Analyze":
                         ) + '</div>'
                         if _opp.get("context") else ""
                     )
-                    + f'</div>',
+                    + '</div>',
                     unsafe_allow_html=True,
                 )
 
@@ -1120,7 +1301,7 @@ if page == "🔍 Analyze":
                                      "MIXED": "#f0b90b", "UNCLEAR": "#8a9bc2"}.get(
                                          _wf.get("driver_type", ""), "#8a9bc2")
                             st.markdown(
-                                f'<div style="background:#161b27;border-left:3px solid {_dt_c};'
+                                f'<div style="background:var(--panel);border-left:3px solid {_dt_c};'
                                 f'border-radius:6px;padding:10px 16px;margin-bottom:10px">'
                                 f'<span style="color:{_dt_c};font-weight:700;font-size:12px">'
                                 f'{_html.escape(_wf.get("driver_type", ""))} DECLINE</span>'
@@ -1161,7 +1342,7 @@ if page == "🔍 Analyze":
                             for t in _av["top"][:3]
                         )
                         st.markdown(
-                            f'<div style="background:#161b27;border:1px solid #2a3348;'
+                            f'<div style="background:var(--panel);border:1px solid var(--border);'
                             f'border-left:4px solid {_av["color"]};border-radius:8px;'
                             f'padding:12px 18px;margin-bottom:14px">'
                             f'<div style="display:flex;justify-content:space-between;'
@@ -1205,31 +1386,58 @@ if page == "🔍 Analyze":
                     )
             with col_kpi:
                 st.markdown('<div class="panel-head">KEY METRICS</div>', unsafe_allow_html=True)
+                st.caption("Colored vs. this stock's own peer group (same names as the "
+                           "Relative tab) — not a fixed universal bar. A 25% gross margin "
+                           "reads differently for a grocer than for a SaaS company.")
                 _m_ov = f_data.get("metrics", {})
+                _peer_df = p_data.get("df")
 
-                def _kpi_cell(label, val_str, tone="mg-base"):
+                def _peer_tone(col, val, higher_is_better=True):
+                    """Percentile rank vs. this stock's own peer group instead of a fixed
+                    universal threshold. Falls back to neutral if there's no usable peer
+                    data (e.g. Haiku couldn't find real peers for this ticker)."""
+                    if val is None or _peer_df is None or _peer_df.empty or col not in _peer_df.columns:
+                        return "mg-base"
+                    peers = _peer_df[_peer_df["Ticker"] != symbol.upper()][col].dropna()
+                    peers = peers[peers.apply(lambda x: isinstance(x, (int, float)))]
+                    if len(peers) < 2:
+                        return "mg-base"
+                    rank = (peers < val).mean() if higher_is_better else (peers > val).mean()
+                    return "mg-up" if rank >= 0.66 else "mg-down" if rank <= 0.33 else "mg-warn"
+
+                def _kpi_cell(label, val_str, tone="mg-base", peer_col=None):
                     _tip = _TIP.get(label) or _EXPLAIN.get(label, "")
-                    _title = f' title="{_tip}"' if _tip else ""
+                    if peer_col and _peer_df is not None and not _peer_df.empty:
+                        _peers_list = _peer_df[_peer_df["Ticker"] != symbol.upper()]["Ticker"].tolist()
+                        if _peers_list:
+                            _tip = (_tip + f" Colored vs. peers: {', '.join(_peers_list)}.").strip()
+                    _title = f' title="{_html.escape(_tip, quote=True)}"' if _tip else ""
                     return (f'<div class="mg-cell" style="cursor:help"{_title}>'
                             f'<div class="mg-label">{label}</div>'
                             f'<div class="mg-val {tone}">{val_str}</div></div>')
 
                 _ov_cells = [
                     _kpi_cell("Revenue Growth", fmt_pct(_m_ov.get("Revenue Growth")),
-                              _tone(_m_ov.get("Revenue Growth"), 0.15, 0, True)),
+                              _peer_tone("Rev Growth", _m_ov.get("Revenue Growth"), True),
+                              "Rev Growth"),
                     _kpi_cell("Gross Margin",   fmt_pct(_m_ov.get("Gross Margin")),
-                              _tone(_m_ov.get("Gross Margin"), 0.55, 0.25, True)),
+                              _peer_tone("Gross Margin", _m_ov.get("Gross Margin"), True),
+                              "Gross Margin"),
                     _kpi_cell("FCF Margin",     fmt_pct(_m_ov.get("FCF Margin")),
-                              _tone(_m_ov.get("FCF Margin"), 0.15, 0, True)),
+                              _peer_tone("FCF Margin", _m_ov.get("FCF Margin"), True),
+                              "FCF Margin"),
                     _kpi_cell("P/S Ratio",
                               f'{_m_ov["P/S Ratio"]:.1f}x' if _m_ov.get("P/S Ratio") else "N/A",
-                              _tone(_m_ov.get("P/S Ratio"), 10, 40, False)),
+                              _peer_tone("P/S", _m_ov.get("P/S Ratio"), False),
+                              "P/S"),
                     _kpi_cell("Forward P/E",
                               f'{_m_ov["Forward P/E"]:.1f}x' if _m_ov.get("Forward P/E") else "N/A",
-                              _tone(_m_ov.get("Forward P/E"), 20, 60, False)),
+                              _peer_tone("Fwd P/E", _m_ov.get("Forward P/E"), False),
+                              "Fwd P/E"),
                     _kpi_cell("Debt/Equity",
                               f'{_m_ov["Debt/Equity"]:.2f}' if _m_ov.get("Debt/Equity") else "N/A",
-                              _tone(_m_ov.get("Debt/Equity"), 0.5, 2, False)),
+                              _peer_tone("Debt/Equity", _m_ov.get("Debt/Equity"), False),
+                              "Debt/Equity"),
                 ]
                 st.markdown(f'<div class="metric-grid">{"".join(_ov_cells)}</div>',
                             unsafe_allow_html=True)
@@ -1240,7 +1448,7 @@ if page == "🔍 Analyze":
                 _pos52 = max(2, min(98, (price - _low52_ov) / (_high52_ov - _low52_ov) * 100)) \
                          if _high52_ov > _low52_ov else 50
                 st.markdown(
-                    f'<div style="background:#1c2333;border:1px solid #2a3348;border-radius:8px;padding:12px 14px">'
+                    f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 14px">'
                     f'<div class="mg-label">52W RANGE</div>'
                     f'<div style="position:relative;height:6px;background:#2a3348;border-radius:3px">'
                     f'<div style="position:absolute;left:0;width:{_pos52}%;height:100%;'
@@ -1337,7 +1545,7 @@ if page == "🔍 Analyze":
                     _up_ov   = f"{((_pt_ov / price - 1)*100):+.1f}%" if _pt_ov and price else "N/A"
                     _up_c_ov = "#16c784" if _pt_ov and price and _pt_ov > price else "#ea3a44"
                     st.markdown(
-                        f'<div style="background:#1c2333;border:1px solid #2a3348;border-radius:8px;padding:12px">'
+                        f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px">'
                         f'<div style="font-size:22px;font-weight:700;color:{_ac_ov};font-family:var(--mono)">{_al_ov}</div>'
                         f'<div style="font-size:11px;color:#8a9bc2;margin:3px 0">{_na_ov} analysts</div>'
                         f'<div style="height:4px;background:#2a3348;border-radius:2px;margin:8px 0 4px">'
@@ -1464,7 +1672,7 @@ if page == "🔍 Analyze":
                     }
                     _chips_html = "".join(
                         f'<span style="display:inline-flex;align-items:center;gap:5px;'
-                        f'background:#1c2333;border:1px solid #2a3348;border-radius:6px;'
+                        f'background:var(--panel);border:1px solid var(--border);border-radius:6px;'
                         f'padding:5px 10px;margin:3px">'
                         f'<span style="font-size:14px">{_html.escape(str(ex["profile"]["icon"]))}</span>'
                         f'<span style="font-family:var(--mono);font-size:11px;color:#8a9bc2">'
@@ -1511,7 +1719,7 @@ if page == "🔍 Analyze":
                         f'</div>'
                     )
                 st.markdown(
-                    f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:10px;'
+                    f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;'
                     f'padding:14px 18px;margin-bottom:14px">'
                     f'<div style="font-size:11px;color:#556070;text-transform:uppercase;'
                     f'letter-spacing:1px;margin-bottom:6px">🎯 In-Context Read — each metric judged '
@@ -1543,7 +1751,7 @@ if page == "🔍 Analyze":
                         _a = str(_mr.get("assessment", "")).upper()
                         _ac = _as_c.get(_a, "#556070")
                         st.markdown(
-                            f'<div style="background:#161b27;border-left:3px solid {_ac};'
+                            f'<div style="background:var(--panel);border-left:3px solid {_ac};'
                             f'border-radius:6px;padding:8px 14px;margin-bottom:6px">'
                             f'<div style="display:flex;justify-content:space-between;flex-wrap:wrap">'
                             f'<b style="color:#e8edf8">{_html.escape(str(_mr.get("metric","")))}'
@@ -1697,7 +1905,7 @@ if page == "🔍 Analyze":
                     _dc_f   = "#16c784" if _days_f > 30 else "#f0b90b" if _days_f > 7 else "#ea3a44"
                     _eps_est_str = f"EPS est: ${e_data['eps_estimate']:.2f}" if e_data.get("eps_estimate") else ""
                     st.markdown(
-                        f'<div style="background:#1c2333;border:1px solid #2a3348;border-radius:8px;padding:14px">'
+                        f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px">'
                         f'<div class="mg-label">NEXT EARNINGS</div>'
                         f'<div style="font-size:22px;font-weight:700;color:{_dc_f};font-family:var(--mono)">'
                         f'{_nxt_f.strftime("%b %d, %Y")}</div>'
@@ -1715,7 +1923,7 @@ if page == "🔍 Analyze":
                 if _br_f is not None:
                     _brc_f = "#16c784" if _br_f >= 70 else "#f0b90b" if _br_f >= 50 else "#ea3a44"
                     st.markdown(
-                        f'<div style="background:#1c2333;border:1px solid #2a3348;border-radius:8px;padding:14px">'
+                        f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px">'
                         f'<div class="mg-label">BEAT RATE</div>'
                         f'<div style="font-size:28px;font-weight:700;color:{_brc_f};font-family:var(--mono)">'
                         f'{_br_f}%</div>'
@@ -1732,7 +1940,7 @@ if page == "🔍 Analyze":
                     _arc_line = (f'<div style="font-size:11px;color:{"#16c784" if (_ar_f or 0)>0 else "#ea3a44"};margin-top:3px>'
                                  f'Avg price reaction: {_ar_f:+.1f}%</div>') if _ar_f is not None else ""
                     st.markdown(
-                        f'<div style="background:#1c2333;border:1px solid #2a3348;border-radius:8px;padding:14px">'
+                        f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px">'
                         f'<div class="mg-label">AVG EARNINGS SURPRISE</div>'
                         f'<div style="font-size:22px;font-weight:700;color:{_asc_f};font-family:var(--mono)">'
                         f'{_as_f:+.1f}%</div>'
@@ -1794,6 +2002,61 @@ if page == "🔍 Analyze":
                     _fig_eps.update_yaxes(gridcolor="#2a3348")
                     st.plotly_chart(_fig_eps, use_container_width=True)
 
+            # ── Earnings Quality — forensic red flags (short-seller lens) ────
+            st.markdown("---")
+            st.markdown("#### 🔬 Earnings Quality — forensic red flags (short-seller lens)")
+            _eq = mod_eq.analyze(symbol)
+            if _eq.get("error"):
+                st.info(_eq["error"])
+            elif not _eq["checks"]:
+                st.info("No financial statement data available.")
+            else:
+                if _eq.get("score") is not None:
+                    _eq_c = ("#16c784" if _eq["score"] >= 7.5 else
+                             "#f0b90b" if _eq["score"] >= 5 else "#ea3a44")
+                    st.markdown(
+                        f'<div style="font-family:IBM Plex Mono,monospace;font-size:15px;'
+                        f'margin-bottom:8px">Quality Score: '
+                        f'<b style="color:{_eq_c}">{_eq["score"]}/10</b></div>',
+                        unsafe_allow_html=True,
+                    )
+                _eq_icons = {"good": "🟢", "warn": "🟡", "flag": "🔴", "na": "⚪"}
+                _eq_tips = {
+                    "Share Dilution": "Is the company issuing new shares? Each new share splits "
+                        "the company's value across more owners — your slice shrinks even if the "
+                        "business itself isn't doing anything wrong. Common with unprofitable "
+                        "growth companies paying employees in stock instead of cash.",
+                    "SBC / Revenue": "Stock-Based Compensation — paying employees in company shares "
+                        "instead of cash salary. Doesn't cost cash today, but it dilutes existing "
+                        "shareholders over time. High SBC relative to revenue is a red flag some "
+                        "companies use to make their 'adjusted' profit look better than reality.",
+                    "Cash Backing (OCF/NI)": "Compares Operating Cash Flow (real cash collected) to "
+                        "Net Income (accounting profit, which includes non-cash items and estimates). "
+                        "When cash flow is well below reported profit for a while, the earnings may "
+                        "be more 'paper' than real — 'profit is an opinion, cash is a fact.'",
+                    "Receivables vs Revenue": "Receivables = money customers owe but haven't paid "
+                        "yet. If receivables are growing much faster than revenue, the company may "
+                        "be booking sales to customers who aren't actually paying — a classic early "
+                        "warning sign of aggressive revenue recognition.",
+                    "FCF Conversion": "Free Cash Flow ÷ Net Income — how much of the accounting "
+                        "profit actually becomes real spendable cash after running and investing in "
+                        "the business. Below 1x for a long stretch means profits look good on paper "
+                        "but aren't showing up in the bank account.",
+                    "Debt Trend": "Is total debt growing faster than the business itself? Rising "
+                        "debt isn't automatically bad (it can fund real growth), but debt growing "
+                        "much faster than revenue is how healthy companies quietly turn fragile.",
+                }
+                for _nm, _stt, _dt in _eq["checks"]:
+                    _tip_eq = _html.escape(_eq_tips.get(_nm, ""), quote=True)
+                    st.markdown(
+                        f'<div style="cursor:help" title="{_tip_eq}">'
+                        f'{_eq_icons.get(_stt,"⚪")} <b>{_html.escape(_nm)} ⓘ</b> — {_html.escape(_dt)}'
+                        f'</div>', unsafe_allow_html=True,
+                    )
+                st.caption("Checks: dilution, stock-comp burden, cash backing of earnings, "
+                           "receivables vs revenue, FCF conversion, debt trend. "
+                           "🔴 flags are what short sellers hunt for. Hover any check for what it means.")
+
         # ── Technical + Momentum ─────────────────────────────────────────────
         with tab_tech:
             st.markdown('<div class="panel-head">PRICE CHART</div>', unsafe_allow_html=True)
@@ -1817,7 +2080,7 @@ if page == "🔍 Analyze":
                     _rsi_v = _rctx["rsi"]
                     # position of current RSI on a 0-100 strip + normal band overlay
                     st.markdown(
-                        f'<div style="background:#161b27;border:1px solid #2a3348;'
+                        f'<div style="background:var(--panel);border:1px solid var(--border);'
                         f'border-left:4px solid {_rv_c};border-radius:8px;'
                         f'padding:14px 18px;margin:6px 0 14px 0" '
                         f'title="{_html.escape(_rctx["tooltip"], quote=True)}">'
@@ -1883,7 +2146,7 @@ if page == "🔍 Analyze":
                     elif v >= 4.5: grade, gc = "⚠ Average",    "#f0b90b"
                     else:          grade, gc = "❌ Weak",       "#ea3a44"
                     st.markdown(
-                        f'<div style="background:#1c2333;border:1px solid #2a3348;'
+                        f'<div style="background:var(--panel);border:1px solid var(--border);'
                         f'border-radius:7px;padding:10px 14px;margin-bottom:8px">'
                         f'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">'
                         f'<span style="color:#9fa8da;font-size:11px;font-family:IBM Plex Mono,monospace">{k}</span>'
@@ -1915,7 +2178,7 @@ if page == "🔍 Analyze":
                 else:
                     rs_col, rs_v = "#ea3a44", "❌ Significant underperformance vs Nasdaq"
                 st.markdown(
-                    f'<div style="padding:8px 12px;background:#1c2333;border-radius:6px;'
+                    f'<div style="padding:8px 12px;background:var(--panel);border-radius:6px;'
                     f'border-left:3px solid {rs_col}">'
                     f'<span style="color:#9fa8da;font-size:11px">RS vs QQQ (3M): </span>'
                     f'<span style="color:{rs_col};font-weight:700">{rs*100:+.1f}%</span>'
@@ -1947,7 +2210,7 @@ if page == "🔍 Analyze":
                 st.markdown('<div class="panel-head">ANALYST CONSENSUS</div>', unsafe_allow_html=True)
                 if _rec_mean:
                     st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:10px;padding:20px">
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px">
   <div style="font-family:'IBM Plex Mono',monospace;font-size:36px;font-weight:700;
               color:{_color};margin-bottom:6px">{_label}</div>
   <div style="font-size:12px;color:#8a9bc2;margin-bottom:14px">{_n_ana} analysts · mean rating {_rec_mean:.1f}/5</div>
@@ -1969,7 +2232,7 @@ if page == "🔍 Analyze":
                     _bar_pos = ((_price - _lo) / (_hi - _lo) * 100) if _hi > _lo else 50
                     _bar_pos = max(2, min(98, _bar_pos))
                     st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:10px;padding:20px">
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px">
   <div style="display:flex;justify-content:space-between;margin-bottom:8px">
     <div>
       <div style="font-size:11px;color:#8a9bc2;font-family:'IBM Plex Mono',monospace">MEAN TARGET</div>
@@ -2039,20 +2302,36 @@ if page == "🔍 Analyze":
                 for emoji, msg in i_data.get("signals", []):
                     st.markdown(f"{emoji} {msg}")
 
-                buy_val  = i_data.get("buy_value", 0)
-                sell_val = i_data.get("sell_value", 0)
+                buy_val     = i_data.get("buy_value", 0)
+                sell_val    = i_data.get("sell_value", 0)
+                sell_routine = i_data.get("sell_value_routine", 0)
+                sell_disc    = i_data.get("sell_value_discretionary", 0)
+                routine_pct  = i_data.get("routine_sell_pct")
                 if buy_val + sell_val > 0:
-                    fig_i = go.Figure(go.Bar(
-                        x=["Insider Buys", "Insider Sells"],
-                        y=[buy_val / 1e6, sell_val / 1e6],
-                        marker_color=["#00c853", "#ff1744"],
-                    ))
+                    if sell_routine or sell_disc:
+                        _ins_x = ["Insider Buys", "Sells — routine\n(repeating pattern)",
+                                  "Sells — discretionary"]
+                        _ins_y = [buy_val / 1e6, sell_routine / 1e6, sell_disc / 1e6]
+                        _ins_c = ["#00c853", "#8a9bc2", "#ff1744"]
+                    else:
+                        _ins_x = ["Insider Buys", "Insider Sells"]
+                        _ins_y = [buy_val / 1e6, sell_val / 1e6]
+                        _ins_c = ["#00c853", "#ff1744"]
+                    fig_i = go.Figure(go.Bar(x=_ins_x, y=_ins_y, marker_color=_ins_c))
                     fig_i.update_layout(
                         yaxis_title="Value ($M)", height=250,
                         paper_bgcolor="#0e1117", plot_bgcolor="#1a1f2e",
                         font_color="#e8eaf6", margin=dict(t=10, b=10),
                     )
                     st.plotly_chart(fig_i, use_container_width=True)
+                    if routine_pct is not None:
+                        st.caption(
+                            f"ℹ️ ~{routine_pct:.0f}% of dollar-value selling matches a "
+                            "repeating-share-count pattern per insider (same count sold 3+ "
+                            "times) — the signature of a scheduled 10b5-1 plan or recurring "
+                            "RSU-vesting sale, not a fresh discretionary decision. The "
+                            "Insider Activity score reacts to the discretionary slice only."
+                        )
 
             # ── Insider Sentiment (MSPR, Finnhub) ─────────────────────────────
             if FINNHUB_API_KEY:
@@ -2136,7 +2415,7 @@ if page == "🔍 Analyze":
                                 f'</tr>'
                             )
                         st.markdown(
-                            f'<div style="background:#161b27;border:1px solid #2a3348;'
+                            f'<div style="background:var(--panel);border:1px solid var(--border);'
                             f'border-radius:8px;padding:10px 14px;overflow-x:auto">'
                             f'<table style="width:100%;border-collapse:collapse;font-size:12px">'
                             f'<tbody>{_ga_rows}</tbody></table></div>',
@@ -2168,7 +2447,7 @@ if page == "🔍 Analyze":
                             bear_pct = round(rec["bears"] / rec["total"] * 100, 1) if rec["total"] else 0
                             hold_pct = round(rec["hold"] / rec["total"] * 100, 1) if rec["total"] else 0
                             st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:10px;padding:20px">
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px">
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
     <div>
       <div style="font-family:'IBM Plex Mono',monospace;font-size:36px;font-weight:700;
@@ -2223,7 +2502,7 @@ if page == "🔍 Analyze":
                             bar_pos = ((current - lo) / (hi - lo) * 100) if hi > lo else 50
                             bar_pos = max(2, min(98, bar_pos))
                             st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:10px;padding:20px">
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px">
   <div style="display:flex;justify-content:space-between;margin-bottom:8px">
     <div>
       <div style="font-size:11px;color:#8a9bc2;font-family:'IBM Plex Mono',monospace">MEAN TARGET</div>
@@ -2321,6 +2600,60 @@ if page == "🔍 Analyze":
                         use_container_width=True, hide_index=True)
                     else:
                         st.info("No insider transaction data available.")
+
+            # ── Forward EPS & Revenue Estimates (Yahoo Finance, always free) ──
+            # Finnhub's and FMP's price-target/estimates endpoints are BOTH
+            # gated to paid plans on the tiers this app uses (verified live —
+            # 402/403 even for a mega-cap), so neither can ever fill this gap
+            # regardless of company size. Yahoo's own consensus tables (via
+            # yfinance) come back populated even for a thinly-covered
+            # micro-cap, so this is shown unconditionally, no API key needed.
+            st.markdown("---")
+            st.markdown('<div class="panel-head">📈 FORWARD EPS & REVENUE ESTIMATES</div>',
+                       unsafe_allow_html=True)
+            _est = mod_inst.get_eps_revenue_estimates(symbol)
+            if _est.get("error") or (_est.get("eps") is None and _est.get("revenue") is None):
+                st.info("No analyst consensus estimates available for this stock "
+                        "(thin/no analyst coverage) — this is a real data gap, not "
+                        "a missing API key.")
+            else:
+                _est_c1, _est_c2 = st.columns(2)
+                with _est_c1:
+                    st.caption("EPS estimate (avg / low-high / # analysts)")
+                    if _est["eps"] is not None:
+                        st.dataframe(
+                            _est["eps"][["avg", "low", "high", "numberOfAnalysts", "growth"]]
+                                .rename(columns={"avg": "Avg EPS", "low": "Low", "high": "High",
+                                                 "numberOfAnalysts": "# Analysts", "growth": "YoY Growth"})
+                                .style.format({"Avg EPS": "${:.2f}", "Low": "${:.2f}",
+                                              "High": "${:.2f}", "YoY Growth": "{:+.1%}"}),
+                            use_container_width=True,
+                        )
+                    else:
+                        st.info("No EPS estimates available.")
+                with _est_c2:
+                    st.caption("Revenue estimate (avg / low-high / # analysts)")
+                    if _est["revenue"] is not None:
+                        st.dataframe(
+                            _est["revenue"][["avg", "low", "high", "numberOfAnalysts", "growth"]]
+                                .rename(columns={"avg": "Avg Revenue", "low": "Low", "high": "High",
+                                                 "numberOfAnalysts": "# Analysts", "growth": "YoY Growth"})
+                                .style.format({"Avg Revenue": "${:,.0f}", "Low": "${:,.0f}",
+                                              "High": "${:,.0f}", "YoY Growth": "{:+.1%}"}),
+                            use_container_width=True,
+                        )
+                    else:
+                        st.info("No revenue estimates available.")
+                if _est.get("eps_revision_pct") is not None:
+                    _rev_pct = _est["eps_revision_pct"]
+                    _rev_color = "#16c784" if _rev_pct > 0 else "#ea3a44" if _rev_pct < 0 else "#8a9bc2"
+                    st.markdown(
+                        f'<div style="font-size:12px;margin-top:6px">90-day forward-EPS revision: '
+                        f'<b style="color:{_rev_color}">{_rev_pct:+.1f}%</b> — '
+                        f'{"estimates rising ahead of price, a quiet-accumulation tell" if _rev_pct > 2 else "estimates falling — analysts turning more cautious" if _rev_pct < -2 else "estimates roughly stable"}'
+                        f'</div>', unsafe_allow_html=True,
+                    )
+                st.caption("Source: Yahoo Finance analyst consensus (via yfinance) — free, no API key.")
 
         # ── Macro + Peers + History ───────────────────────────────────────────
         with tab_macro_peers:
@@ -2513,9 +2846,77 @@ if page == "🔍 Analyze":
                 )
 
         # ── Experts ───────────────────────────────────────────────────────────
-        with tab_experts:
+        with tab_panel:
             st.subheader("🧠 Expert Panel — 8 AI Investor Personas")
             st.caption("Each expert analyzes this stock through their own investment lens. Requires ANTHROPIC_API_KEY.")
+
+            _fm_ov = mod_fm.analyze_stock(symbol)
+            if not _fm_ov.get("error"):
+                _cv_ov = mod_fm.combined_verdict(_fm_ov)
+                _experts_key = f"experts_{symbol}"
+                _ai_scores = {}
+                if _experts_key in st.session_state:
+                    _dec_base = {"BUY": 8.0, "WATCH": 6.0, "HOLD": 5.0, "SELL": 2.0}
+                    for _ex_ov in st.session_state[_experts_key]:
+                        _dec_ov = _ex_ov.get("decision", "HOLD")
+                        _conv_ov = _ex_ov.get("conviction", 3)
+                        _sc_ov = _dec_base.get(_dec_ov, 5.0) + (_conv_ov - 3) * 0.6
+                        _ai_scores[f"AI · {_ex_ov.get('name', '?')}"] = max(0.0, min(10.0, _sc_ov))
+
+                if _cv_ov["score"] is not None and _ai_scores:
+                    _quant_avg_ov = _cv_ov["score"]
+                    _ai_avg_ov = sum(_ai_scores.values()) / len(_ai_scores)
+                    _overall_ov = round(_quant_avg_ov * 0.6 + _ai_avg_ov * 0.4, 1)
+                    _all_breakdown_ov = {**_cv_ov["breakdown"], **_ai_scores}
+                    _weight_note_ov = (f"60% weight: {_cv_ov['n_total']} mechanical guru/quant models "
+                                       f"· 40% weight: {len(_ai_scores)} AI experts")
+                elif _cv_ov["score"] is not None:
+                    _overall_ov = _cv_ov["score"]
+                    _all_breakdown_ov = dict(_cv_ov["breakdown"])
+                    _weight_note_ov = (f"{_cv_ov['n_total']} mechanical guru/quant models only — "
+                                       f"run the AI Expert Panel below to fold their votes into this score.")
+                else:
+                    _overall_ov = None
+                    _all_breakdown_ov = {}
+                    _weight_note_ov = ""
+
+                if _overall_ov is not None:
+                    _n_bull_ov = sum(1 for v in _all_breakdown_ov.values() if v >= 7)
+                    _n_bear_ov = sum(1 for v in _all_breakdown_ov.values() if v <= 3)
+                    _n_neu_ov  = len(_all_breakdown_ov) - _n_bull_ov - _n_bear_ov
+                    _ov_label, _ov_color = (
+                        ("BULLISH CONSENSUS", "#16c784") if _overall_ov >= 7 else
+                        ("LEAN BULLISH", "#a3e635") if _overall_ov >= 5.5 else
+                        ("MIXED / NO CONSENSUS", "#f0b90b") if _overall_ov >= 4.5 else
+                        ("LEAN BEARISH", "#f97316") if _overall_ov >= 3 else
+                        ("BEARISH CONSENSUS", "#ea3a44")
+                    )
+                    st.subheader("🏆 Overall Verdict — every model & expert, one number")
+                    st.markdown(
+                        f'<div style="background:{_ov_color}18;border:2px solid {_ov_color}70;'
+                        f'border-radius:12px;padding:18px 22px;margin:8px 0">'
+                        f'<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
+                        f'<span style="font-family:IBM Plex Mono,monospace;font-size:30px;'
+                        f'font-weight:900;color:{_ov_color}">{_overall_ov}/10</span>'
+                        f'<span style="font-family:IBM Plex Mono,monospace;font-size:16px;'
+                        f'font-weight:700;color:{_ov_color}">{_ov_label}</span>'
+                        f'<span style="font-size:12px;color:#8a9bc2">{_n_bull_ov} say buy · '
+                        f'{_n_neu_ov} neutral · {_n_bear_ov} say sell/avoid '
+                        f'(of {len(_all_breakdown_ov)} voices)</span>'
+                        f'</div>'
+                        f'<div style="font-size:11px;color:#556070;margin-top:8px">{_weight_note_ov}</div>'
+                        f'</div>', unsafe_allow_html=True,
+                    )
+                    with st.expander("Who says what — every model & expert, ranked"):
+                        for _mname_ov, _mscore_ov in sorted(_all_breakdown_ov.items(), key=lambda x: -x[1]):
+                            _mc_ov = ("#16c784" if _mscore_ov >= 7 else
+                                     "#ea3a44" if _mscore_ov <= 3 else "#f0b90b")
+                            st.markdown(
+                                f'<div style="font-size:13px;padding:2px 0">{_mname_ov}: '
+                                f'<b style="color:{_mc_ov}">{_mscore_ov:.1f}/10</b></div>',
+                                unsafe_allow_html=True,
+                            )
+                st.markdown("---")
 
             price_now = info.get("currentPrice") or info.get("regularMarketPrice", 0)
 
@@ -2584,7 +2985,7 @@ if page == "🔍 Analyze":
                         style_e    = _html.escape(style_str)
                         horizon    = _html.escape(str(ex.get("time_horizon", "")))
                         horizon_html = (
-                            f'<span style="font-size:9px;background:#252b3b;color:#9fa8da;'
+                            f'<span style="font-size:9px;background:var(--panel2);color:#9fa8da;'
                             f'border-radius:4px;padding:2px 6px;margin-left:6px">{horizon}</span>'
                             if horizon else ""
                         )
@@ -2602,56 +3003,91 @@ if page == "🔍 Analyze":
                                 for r in risks
                             )
                             risks_html = (
-                                f'<div style="margin-top:12px;padding-top:10px;border-top:1px solid #30384a">'
+                                f'<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">'
                                 f'<div style="font-size:9px;color:#556070;text-transform:uppercase;'
                                 f'letter-spacing:.7px;margin-bottom:4px">⚠️ Key Risks</div>'
                                 f'{items}</div>'
                             )
                         return (
-                            # Fixed height + flex-column so all cards in a row are identical
-                            f'<div style="background:#1a1f2e;border:1px solid #30384a;border-radius:12px;'
-                            f'padding:18px;height:480px;display:flex;flex-direction:column">'
-                            # ── static header ──────────────────────────────────────
-                            f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">'
-                            f'<span style="font-size:24px">{ex["profile"]["icon"]}</span>'
-                            f'<div>'
-                            f'<div style="font-size:16px;font-weight:700;color:#e8eaf6">{name_e}</div>'
-                            f'<div style="font-size:11px;color:#9fa8da">{style_e}{horizon_html}</div>'
+                            # Uses the shared .ui-card surface + accent border in the decision
+                            # colour, so these match every other card in the app.
+                            f'<div class="ui-card ui-card-accent" '
+                            f'style="border-left-color:{d_color};display:flex;flex-direction:column">'
+                            # ── header ─────────────────────────────────────────────
+                            f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">'
+                            f'<span style="font-size:22px;line-height:1">{ex["profile"]["icon"]}</span>'
+                            f'<div style="min-width:0">'
+                            f'<div class="ui-card-title" style="margin-bottom:1px">{name_e}</div>'
+                            f'<div class="ui-card-sub">{style_e}{horizon_html}</div>'
                             f'</div></div>'
-                            f'<div style="font-size:32px;font-weight:800;color:{d_color};margin:10px 0 2px">{decision}</div>'
-                            f'<div title="{t_conv}" style="color:#ffd600;font-size:16px;margin-bottom:2px;cursor:help">{stars} ℹ</div>'
-                            f'<div style="font-size:10px;color:#9fa8da;margin-bottom:10px">Conviction {conviction}/5</div>'
-                            f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px;flex-shrink:0">'
-                            f'<div title="{t_entry}" style="background:#252b3b;border-radius:6px;padding:6px 10px;cursor:help">'
-                            f'<div style="color:#9fa8da;font-size:10px">ENTRY ℹ</div>'
-                            f'<div style="color:#e8eaf6;font-weight:600">{entry}</div></div>'
-                            f'<div title="{t_target}" style="background:#252b3b;border-radius:6px;padding:6px 10px;cursor:help">'
-                            f'<div style="color:#9fa8da;font-size:10px">TARGET ℹ</div>'
-                            f'<div style="color:#00c853;font-weight:600">{target}</div></div>'
-                            f'<div title="{t_pos}" style="background:#252b3b;border-radius:6px;padding:6px 10px;cursor:help">'
-                            f'<div style="color:#9fa8da;font-size:10px">POSITION % ℹ</div>'
-                            f'<div style="color:#e8eaf6;font-weight:600">{pos:.1f}%</div></div>'
-                            f'<div title="{t_sl}" style="background:#252b3b;border-radius:6px;padding:6px 10px;cursor:help">'
-                            f'<div style="color:#9fa8da;font-size:10px">STOP LOSS ℹ</div>'
-                            f'<div style="color:#ff6d00;font-weight:600">-{sl:.0f}%</div></div>'
+                            # ── decision + conviction on ONE row (was 3 stacked rows
+                            #    eating vertical space and pushing text down) ────────
+                            f'<div style="display:flex;align-items:baseline;gap:10px;'
+                            f'flex-wrap:wrap;margin:8px 0 12px">'
+                            f'<span style="font-family:var(--mono);font-size:26px;font-weight:800;'
+                            f'color:{d_color};line-height:1">{decision}</span>'
+                            f'<span title="{t_conv}" style="cursor:help;font-size:12px;color:#ffd600">'
+                            f'{stars}</span>'
+                            f'<span style="font-size:10px;color:var(--dim)">Conviction {conviction}/5</span>'
                             f'</div>'
-                            # ── scrollable rationale + risks ───────────────────────
-                            f'<div style="flex:1;overflow-y:auto;margin-top:10px;padding-top:10px;'
-                            f'border-top:1px solid #30384a;padding-right:4px">'
-                            f'<div style="font-size:13px;color:#cfd8dc;line-height:1.6">{rationale}</div>'
+                            # ── 4 stat tiles ───────────────────────────────────────
+                            f'<div style="display:grid;grid-template-columns:repeat(4,1fr);'
+                            f'gap:1px;background:var(--border);border:1px solid var(--border);'
+                            f'border-radius:8px;overflow:hidden">'
+                            f'<div title="{t_entry}" style="background:var(--panel2);padding:8px 10px;cursor:help">'
+                            f'<div class="ui-card-meta" style="margin-bottom:3px">ENTRY</div>'
+                            f'<div style="font-family:var(--mono);font-size:13px;font-weight:600;'
+                            f'color:var(--text)">{entry}</div></div>'
+                            f'<div title="{t_target}" style="background:var(--panel2);padding:8px 10px;cursor:help">'
+                            f'<div class="ui-card-meta" style="margin-bottom:3px">TARGET</div>'
+                            f'<div style="font-family:var(--mono);font-size:13px;font-weight:600;'
+                            f'color:var(--up)">{target}</div></div>'
+                            f'<div title="{t_pos}" style="background:var(--panel2);padding:8px 10px;cursor:help">'
+                            f'<div class="ui-card-meta" style="margin-bottom:3px">SIZE</div>'
+                            f'<div style="font-family:var(--mono);font-size:13px;font-weight:600;'
+                            f'color:var(--text)">{pos:.1f}%</div></div>'
+                            f'<div title="{t_sl}" style="background:var(--panel2);padding:8px 10px;cursor:help">'
+                            f'<div class="ui-card-meta" style="margin-bottom:3px">STOP</div>'
+                            f'<div style="font-family:var(--mono);font-size:13px;font-weight:600;'
+                            f'color:#ff6d00">-{sl:.0f}%</div></div>'
+                            f'</div>'
+                            # ── rationale + risks — full text, no clipping ─────────
+                            f'<div style="margin-top:12px;padding-top:10px;'
+                            f'border-top:1px solid var(--border)">'
+                            f'<div style="font-size:13px;color:#cfd8dc;line-height:1.65">{rationale}</div>'
                             f'{risks_html}'
                             f'</div>'
                             f'</div>'
                         )
 
-                    def _render_expert_row(cols_list, expert_slice):
-                        for col, ex in zip(cols_list, expert_slice):
-                            col.markdown(_expert_card(ex), unsafe_allow_html=True)
-
-                    _render_expert_row(st.columns(4), _experts[:4])
-                    st.markdown("<div style='margin-top:16px'></div>", unsafe_allow_html=True)
-                    if len(_experts) > 4:
-                        _render_expert_row(st.columns(4), _experts[4:])
+                    # One auto-fit grid instead of two fixed st.columns(4) rows —
+                    # 4 forced columns squeezed each card to ~250px, so rationale
+                    # text wrapped 2-3 words per line. Now cards hold a readable
+                    # min width and reflow to fit the viewport.
+                    # st.html (not st.markdown) — markdown pre-processing mangles a
+                    # block this size/nesting, which blanked the whole panel.
+                    # Style is inlined so the grid renders even if the global
+                    # stylesheet isn't in scope for this element.
+                    st.html(
+                        '<style>'
+                        '.xp-grid{display:grid;'
+                        'grid-template-columns:repeat(auto-fit,minmax(300px,1fr));'
+                        'gap:12px;margin-bottom:12px}'
+                        '.xp-grid>div{height:100%;margin-bottom:0}'
+                        # Card styles repeated here with literal values (not var())
+                        # so the panel is not dependent on the global sheet.
+                        '.xp-grid .ui-card{background:#1c2333;border:1px solid #2a3348;'
+                        'border-radius:10px;padding:16px 18px}'
+                        '.xp-grid .ui-card-accent{border-left-width:4px;border-left-style:solid}'
+                        '.xp-grid .ui-card-title{font-size:15px;font-weight:700;color:#e8edf8}'
+                        '.xp-grid .ui-card-sub{font-size:12px;color:#8a9bc2;line-height:1.6}'
+                        '.xp-grid .ui-card-meta{font-size:10px;text-transform:uppercase;'
+                        'letter-spacing:.8px;color:#556070}'
+                        '</style>'
+                        '<div class="xp-grid">'
+                        + "".join(_expert_card(ex) for ex in _experts)
+                        + '</div>'
+                    )
 
                     # ── Panel Synthesis — the moderator's distilled verdict ──
                     st.markdown("---")
@@ -2690,7 +3126,7 @@ if page == "🔍 Analyze":
                                      "AVOID": "#ff6d00", "SELL": "#ff1744"}.get(_sv, "#9fa8da")
                             _sconv = _syn.get("conviction", 5)
                             st.markdown(
-                                f'<div style="background:#1a1f2e;border:2px solid {_sv_c};'
+                                f'<div style="background:var(--panel);border:2px solid {_sv_c};'
                                 f'border-radius:12px;padding:20px 24px;margin:10px 0">'
                                 f'<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
                                 f'<span style="font-family:IBM Plex Mono,monospace;font-size:26px;'
@@ -2747,442 +3183,18 @@ if page == "🔍 Analyze":
                                         for _wc in _ps["watch_carefully"]:
                                             st.markdown(f"- {_wc}")
 
-        # ── Seasonality ──────────────────────────────────────────────────────────
-        with tab_seasonal:
-            st.subheader("📅 Monthly Seasonality")
-            st.caption("Historical average monthly returns based on 10 years of data. Past patterns do not guarantee future returns.")
-
-            with st.spinner("Loading seasonality data..."):
-                _seas = mod_seasonal.get_seasonality(symbol, years=10)
-
-            if not _seas or not _seas.get("monthly"):
-                st.info("Seasonality data unavailable for this symbol.")
-            else:
-                _MNAMES = mod_seasonal.MONTH_NAMES
-                _monthly  = _seas["monthly"]
-                _best_m   = _seas["best_month"]
-                _worst_m  = _seas["worst_month"]
-                _cur_m    = _seas["current_month"]
-                _yrs      = _seas["years_analyzed"]
-
-                # Hero cards
-                _c1, _c2, _c3, _c4 = st.columns(4)
-                with _c1:
-                    _bm = _monthly[_best_m]
-                    st.metric("Best Month", _MNAMES[_best_m - 1],
-                              f"+{_bm['avg_return']*100:.1f}% avg · {_bm['win_rate']*100:.0f}% win rate")
-                with _c2:
-                    _wm = _monthly[_worst_m]
-                    st.metric("Worst Month", _MNAMES[_worst_m - 1],
-                              f"{_wm['avg_return']*100:.1f}% avg · {_wm['win_rate']*100:.0f}% win rate")
-                with _c3:
-                    _cm = _monthly.get(_cur_m, {})
-                    _cm_avg = _cm.get("avg_return", 0)
-                    _cm_wr  = _cm.get("win_rate", 0)
-                    _cm_lbl = f"{_cm_avg*100:+.1f}% avg · {_cm_wr*100:.0f}% win rate" if _cm else "No data"
-                    st.metric(f"This Month ({_MNAMES[_cur_m-1]})", "Current", _cm_lbl)
-                with _c4:
-                    st.metric("Data Range", f"{_yrs} years", "Monthly close-to-close")
-
-                # Monthly bar chart
-                _avgs   = [_monthly.get(m, {}).get("avg_return", 0) * 100 for m in range(1, 13)]
-                _wrates = [_monthly.get(m, {}).get("win_rate", 0) * 100   for m in range(1, 13)]
-                _medns  = [_monthly.get(m, {}).get("median", 0) * 100     for m in range(1, 13)]
-                _cnts   = [_monthly.get(m, {}).get("count", 0)            for m in range(1, 13)]
-                _bar_colors = ["#16c784" if a >= 0 else "#ea3a44" for a in _avgs]
-
-                _fig_seas = go.Figure()
-                _fig_seas.add_trace(go.Bar(
-                    x=_MNAMES, y=_avgs,
-                    marker_color=_bar_colors,
-                    text=[f"{a:+.1f}%" for a in _avgs],
-                    textposition="outside",
-                    customdata=list(zip(_wrates, _medns, _cnts)),
-                    hovertemplate=(
-                        "<b>%{x}</b><br>"
-                        "Avg Return: %{y:+.2f}%<br>"
-                        "Win Rate: %{customdata[0]:.0f}%<br>"
-                        "Median: %{customdata[1]:+.2f}%<br>"
-                        "Years: %{customdata[2]}<extra></extra>"
-                    ),
-                ))
-                _fig_seas.update_layout(
-                    title=dict(text=f"{symbol} — Average Monthly Return ({_yrs}Y)", font=dict(color="#b0bec5")),
-                    plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
-                    font=dict(color="#b0bec5", family="IBM Plex Mono, monospace", size=11),
-                    yaxis=dict(ticksuffix="%", gridcolor="#1e2738", zerolinecolor="#2a3348"),
-                    xaxis=dict(gridcolor="#1e2738"),
-                    height=330, margin=dict(l=0, r=0, t=40, b=0),
-                    showlegend=False,
-                )
-                st.plotly_chart(_fig_seas, use_container_width=True)
-
-                # Heatmap table
-                _hmap = _seas.get("heatmap", {})
-                if _hmap:
-                    _all_returns = [v for yr in _hmap.values() for v in yr.values() if v is not None]
-                    _max_abs = max(abs(r) for r in _all_returns) if _all_returns else 0.1
-
-                    def _hmap_color(ret):
-                        if ret is None:
-                            return "#1e2738", "#556070"
-                        intensity = min(abs(ret) / (_max_abs + 0.001), 1.0)
-                        if ret > 0:
-                            g_val = int(100 + 100 * intensity)
-                            return f"rgba(22,{g_val},100,{0.15 + 0.5*intensity})", "#16c784"
-                        else:
-                            r_val = int(150 + 80 * intensity)
-                            return f"rgba({r_val},58,68,{0.15 + 0.5*intensity})", "#ea3a44"
-
-                    _header_cells = "".join(
-                        f'<th style="padding:4px 6px;font-size:10px;color:#556070;'
-                        f'font-family:IBM Plex Mono,monospace;text-align:center">{mn[:3]}</th>'
-                        for mn in _MNAMES
-                    )
-                    _rows_html = ""
-                    for yr in sorted(_hmap.keys(), reverse=True):
-                        _row_cells = ""
-                        for m in range(1, 13):
-                            ret = _hmap[yr].get(m)
-                            bg, fg = _hmap_color(ret)
-                            val_str = f"{ret*100:+.1f}%" if ret is not None else "—"
-                            _row_cells += (
-                                f'<td style="padding:3px 5px;font-size:11px;font-family:IBM Plex Mono,monospace;'
-                                f'color:{fg};background:{bg};text-align:center;border-radius:3px">{val_str}</td>'
-                            )
-                        _rows_html += (
-                            f'<tr><td style="padding:3px 8px;font-size:11px;color:#b0bec5;'
-                            f'font-family:IBM Plex Mono,monospace;white-space:nowrap">{yr}</td>'
-                            f'{_row_cells}</tr>'
-                        )
-
-                    st.markdown(
-                        f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;'
-                        f'padding:12px 16px;margin-top:8px;overflow-x:auto">'
-                        f'<div style="font-size:10px;font-family:IBM Plex Mono,monospace;color:#16c784;'
-                        f'text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">'
-                        f'MONTHLY RETURN HEATMAP — {symbol} — {_yrs} YEARS</div>'
-                        f'<table style="width:100%;border-collapse:separate;border-spacing:2px">'
-                        f'<thead><tr><th style="padding:4px 8px;font-size:10px;color:#556070;'
-                        f'font-family:IBM Plex Mono,monospace;text-align:left">YEAR</th>'
-                        f'{_header_cells}</tr></thead>'
-                        f'<tbody>{_rows_html}</tbody></table></div>',
-                        unsafe_allow_html=True,
-                    )
-
-        # ── 13F Smart Money ───────────────────────────────────────────────────────
-        with tab_13f:
-            st.subheader("🏛 13F Smart Money Tracker")
-            st.caption(
-                "Institutional 13F filings from 11 famous hedge funds. "
-                "Data is ~45 days delayed (SEC mandatory filing deadline). "
-                "Change vs. prior quarter."
-            )
-
-            with st.spinner("Fetching 13F filings from SEC EDGAR... (~15s on first load, cached 24h)"):
-                _stock_long_name = info.get("longName") or info.get("shortName") or symbol
-                _smart_money = mod_13f.get_smart_money_for_stock(symbol, _stock_long_name)
-
-            if not _smart_money:
-                st.info(
-                    f"No tracked funds held **{symbol}** in the latest quarter. "
-                    "Tracked funds: Druckenmiller, Ackman, Tepper, Klarman, Tiger Global, "
-                    "Bridgewater, Viking Global, Coatue, Renaissance, Cathie Wood, Burry."
-                )
-            else:
-                _sm_rows = ""
-                for _sm in _smart_money:
-                    _sm_rows += (
-                        f'<tr>'
-                        f'<td style="padding:6px 10px;font-family:IBM Plex Mono,monospace;'
-                        f'font-weight:700;color:#e8eaf6;white-space:nowrap">{_sm["fund"]}</td>'
-                        f'<td style="padding:6px 10px;color:#8a9bc2;font-size:12px">{_sm["style"]}</td>'
-                        f'<td style="padding:6px 10px;font-family:IBM Plex Mono,monospace;'
-                        f'color:#b0bec5;text-align:right">{_sm["shares_fmt"]}</td>'
-                        f'<td style="padding:6px 10px;font-family:IBM Plex Mono,monospace;'
-                        f'color:#b0bec5;text-align:right">{_sm["value_fmt"]}</td>'
-                        f'<td style="padding:6px 10px;font-family:IBM Plex Mono,monospace;'
-                        f'font-weight:700;color:{_sm["change_color"]};white-space:nowrap">'
-                        f'{_sm["change_label"]}</td>'
-                        f'<td style="padding:6px 10px;color:#556070;font-size:11px;white-space:nowrap">'
-                        f'{_sm["filing_date"]}</td>'
-                        f'</tr>'
-                    )
-
-                st.markdown(
-                    f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;'
-                    f'padding:12px 16px;margin-top:8px;overflow-x:auto">'
-                    f'<div style="font-size:10px;font-family:IBM Plex Mono,monospace;color:#16c784;'
-                    f'text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">'
-                    f'13F SMART MONEY · {len(_smart_money)} TRACKED FUND{"S" if len(_smart_money)>1 else ""} '
-                    f'HOLDING {symbol} · SEC EDGAR</div>'
-                    f'<table style="width:100%;border-collapse:collapse">'
-                    f'<thead><tr>'
-                    f'<th style="text-align:left;font-size:10px;color:#556070;padding:2px 10px;'
-                    f'font-family:IBM Plex Mono,monospace">FUND</th>'
-                    f'<th style="text-align:left;font-size:10px;color:#556070;padding:2px 10px;'
-                    f'font-family:IBM Plex Mono,monospace">STYLE</th>'
-                    f'<th style="text-align:right;font-size:10px;color:#556070;padding:2px 10px;'
-                    f'font-family:IBM Plex Mono,monospace">SHARES</th>'
-                    f'<th style="text-align:right;font-size:10px;color:#556070;padding:2px 10px;'
-                    f'font-family:IBM Plex Mono,monospace">VALUE</th>'
-                    f'<th style="text-align:left;font-size:10px;color:#556070;padding:2px 10px;'
-                    f'font-family:IBM Plex Mono,monospace">CHANGE</th>'
-                    f'<th style="text-align:left;font-size:10px;color:#556070;padding:2px 10px;'
-                    f'font-family:IBM Plex Mono,monospace">FILED</th>'
-                    f'</tr></thead>'
-                    f'<tbody>{_sm_rows}</tbody>'
-                    f'</table></div>',
-                    unsafe_allow_html=True,
-                )
-
-                st.caption(
-                    f"Source: SEC EDGAR 13F-HR filings. "
-                    f"Data reflects Q-end positions filed ~45 days later. "
-                    f"Change = vs. prior quarter filing."
-                )
-
-        # ── DCF Valuation (dcf-valuation skill) ──────────────────────────────
-        with tab_dcf:
-            st.subheader(f"💎 DCF Intrinsic Value — {symbol}")
-            st.caption("Two-stage discounted-cash-flow model: 5-year FCF projection + Gordon "
-                       "terminal value. Adjust assumptions below — defaults come from the "
-                       "stock's own history.")
-
-            _dcf_in = mod_dcf.get_dcf_inputs(symbol)
-            if _dcf_in.get("error"):
-                st.info(f"DCF unavailable: {_dcf_in['error']}")
-            elif _dcf_in.get("negative_fcf"):
-                st.warning("This company has negative free cash flow — a standard DCF is not "
-                           "meaningful. Valuation should rely on revenue multiples or "
-                           "path-to-profitability analysis instead.")
-            else:
-                _dc1, _dc2, _dc3 = st.columns(3)
-                with _dc1:
-                    _g5 = st.slider("FCF growth (5y, %/yr)", -10.0, 40.0,
-                                    float(_dcf_in["suggested_g"] * 100), 0.5,
-                                    key=f"_dcf_g_{symbol}",
-                                    help="Suggested from historical FCF CAGR") / 100
-                with _dc2:
-                    _beta_def = _dcf_in.get("beta") or 1.0
-                    _wacc_def = min(15.0, max(7.0, 4.5 + 5.0 * float(_beta_def)))
-                    _wacc = st.slider("Discount rate / WACC (%)", 6.0, 18.0,
-                                      round(_wacc_def, 1), 0.5,
-                                      key=f"_dcf_w_{symbol}",
-                                      help="Default ≈ risk-free 4.5% + beta × 5% equity premium") / 100
-                with _dc3:
-                    _gt = st.slider("Terminal growth (%)", 0.0, 4.0, 2.5, 0.25,
-                                    key=f"_dcf_t_{symbol}") / 100
-
-                _dcf_res = mod_dcf.run_dcf(
-                    _dcf_in["base_fcf"], _g5, _gt, _wacc,
-                    _dcf_in["net_debt"], _dcf_in["shares_out"],
-                )
-                if _dcf_res.get("error"):
-                    st.error(_dcf_res["error"])
-                else:
-                    _iv    = _dcf_res["intrinsic_ps"]
-                    _px    = _dcf_in["price"]
-                    _ups   = (_iv / _px - 1) * 100 if _px > 0 else 0
-                    _ups_c = "#16c784" if _ups > 15 else ("#ea3a44" if _ups < -15 else "#f0b90b")
-                    _verdict = ("UNDERVALUED" if _ups > 15 else
-                                "OVERVALUED" if _ups < -15 else "FAIRLY VALUED")
-
-                    _dm1, _dm2, _dm3, _dm4 = st.columns(4)
-                    _dm1.metric("Intrinsic Value", f"${_iv:,.2f}",
-                                help=mod_gloss.tip("intrinsic_value"))
-                    _dm2.metric("Market Price", f"${_px:,.2f}")
-                    _dm3.metric("Upside / Downside", f"{_ups:+.1f}%",
-                                help=mod_gloss.tip("dcf"))
-                    _dm4.metric("Terminal Weight", f"{_dcf_res['terminal_weight']:.0f}%",
-                                help="Share of value from the terminal period. Above ~80% = "
-                                     "valuation highly sensitive to terminal assumptions.")
-                    st.markdown(
-                        f'<div style="background:{_ups_c}18;border:1px solid {_ups_c}50;'
-                        f'border-radius:8px;padding:10px 16px;margin:8px 0;'
-                        f'color:{_ups_c};font-weight:700;font-family:IBM Plex Mono,monospace">'
-                        f'{_verdict} by DCF at these assumptions</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    # FCF projection chart
-                    _proj = _dcf_res["fcf_projection"]
-                    _fig_dcf = go.Figure()
-                    _fig_dcf.add_trace(go.Bar(
-                        x=[f"Y{p['year']}" for p in _proj],
-                        y=[p["fcf"] / 1e9 for p in _proj],
-                        name="Projected FCF", marker_color="#4da3ff", opacity=0.8,
-                    ))
-                    _fig_dcf.add_trace(go.Bar(
-                        x=[f"Y{p['year']}" for p in _proj],
-                        y=[p["pv"] / 1e9 for p in _proj],
-                        name="Present Value", marker_color="#16c784", opacity=0.8,
-                    ))
-                    _fig_dcf.update_layout(
-                        barmode="group", height=240,
-                        margin=dict(l=0, r=0, t=10, b=0),
-                        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-                        font=dict(color="#cdd6f4"),
-                        yaxis=dict(title="$B", gridcolor="#1e2535"),
-                        legend=dict(orientation="h", y=1.1, x=0),
-                    )
-                    st.plotly_chart(_fig_dcf, use_container_width=True,
-                                    config={"displayModeBar": False})
-
-                    # Sensitivity matrix
-                    st.markdown("**Sensitivity — Intrinsic Value per Share** (growth × discount)")
-                    _sens = mod_dcf.sensitivity_matrix(
-                        _dcf_in["base_fcf"], _gt, _dcf_in["net_debt"],
-                        _dcf_in["shares_out"], _g5, _wacc,
-                    )
-                    def _sens_color(v):
-                        if pd.isna(v):
-                            return ""
-                        return ("color: #16c784" if v > _px * 1.15 else
-                                "color: #ea3a44" if v < _px * 0.85 else "color: #f0b90b")
-                    st.dataframe(
-                        _sens.style.format("${:,.0f}").map(_sens_color),
-                        use_container_width=True,
-                    )
-                    st.caption("Green = >15% above market price at those assumptions · "
-                               "Red = >15% below · Amber = near market price.")
-
-        # ── Fund Models (quantitative hedge-fund rulebooks) ──────────────────
-        with tab_fm:
-            st.subheader(f"🏦 Fund Models — {symbol}")
-            st.caption("Famous fund rulebooks applied mechanically — no AI, pure rules. "
-                       "How would each discipline treat this stock right now?")
+            # ── 🎓 Guru Checklists — mechanical, no LLM, cross-check for the AI panel above ──
+            st.markdown("---")
+            st.subheader("🎓 Guru Checklists — the legends, mechanically applied")
+            st.caption("No AI here — pure rules from each investor's published criteria. "
+                       "Compare against the AI personas above: same investing philosophies, "
+                       "one gives a live narrative opinion, this one just runs the numbers. "
+                       "Hover any card title for who invented the method and how it's computed.")
 
             _fm = mod_fm.analyze_stock(symbol)
-            _tip_minervini_method = _html.escape(mod_gloss.tip("minervini_method"), quote=True)
-            _tip_turtle_method = _html.escape(mod_gloss.tip("turtle_method"), quote=True)
-            _tip_trend_following_method = _html.escape(mod_gloss.tip("trend_following_method"), quote=True)
-            _tip_druckenmiller_method = _html.escape(mod_gloss.tip("druckenmiller_method"), quote=True)
-            _tip_kelly_method = _html.escape(mod_gloss.tip("kelly_method"), quote=True)
             if _fm.get("error"):
-                st.info(f"Fund models unavailable: {_fm['error']}")
+                st.info(f"Guru checklists unavailable: {_fm['error']}")
             else:
-                _fm_c1, _fm_c2 = st.columns(2)
-
-                # ── Minervini Trend Template ─────────────────────────────────
-                with _fm_c1:
-                    _min = _fm["minervini"]
-                    _min_pass = _min["passed"]
-                    _min_c = "#16c784" if _min_pass == 7 else ("#f0b90b" if _min_pass >= 5 else "#ea3a44")
-                    st.markdown(
-                        f'<div style="background:#161b27;border:1px solid #2a3348;border-left:4px solid {_min_c};'
-                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" '
-                        f'title="{_tip_minervini_method}">'
-                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:2px">'
-                        f'📈 Minervini Trend Template <span style="color:{_min_c}">'
-                        f'{_min_pass}/{_min["total"]}</span></div>'
-                        f'<div style="font-size:12px;color:#8a9bc2;margin-bottom:8px">{_min["verdict"]}</div>'
-                        + "".join(
-                            f'<div style="font-size:12px;color:{"#16c784" if ok else "#ea3a44"};'
-                            f'padding:1px 0">{"✓" if ok else "✗"} {lbl}</div>'
-                            for lbl, ok in _min["checks"]
-                        ) + '</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    # ── Turtle / Donchian ────────────────────────────────────
-                    _tur = _fm["turtle"]
-                    st.markdown(
-                        f'<div style="background:#161b27;border:1px solid #2a3348;'
-                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_turtle_method}">'
-                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:6px">🐢 Turtle Breakout Rules</div>'
-                        f'<div style="font-size:12px;color:#cdd6f4">System 1 (20d): {_tur["s1"]}</div>'
-                        f'<div style="font-size:12px;color:#cdd6f4">System 2 (55d): {_tur["s2"]}</div>'
-                        + (f'<div style="font-size:11px;color:#556070;margin-top:6px">'
-                           f'20d high ${_tur["hi20"]:,.2f} · 55d high ${_tur["hi55"]:,.2f} · '
-                           f'exit lows ${_tur["lo10"]:,.2f}/${_tur["lo20"]:,.2f}</div>'
-                           if _tur.get("hi20") else "")
-                        + '</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    # ── Trend following ──────────────────────────────────────
-                    _tr = _fm["trend"]
-                    _tr_c = {"LONG": "#16c784", "SHORT/AVOID": "#ea3a44",
-                             "MIXED": "#f0b90b"}.get(_tr["signal"], "#556070")
-                    st.markdown(
-                        f'<div style="background:#161b27;border:1px solid #2a3348;'
-                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_trend_following_method}">'
-                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:4px">'
-                        f'📉 Managed-Futures Trend: <span style="color:{_tr_c}">{_tr["signal"]}</span></div>'
-                        f'<div style="font-size:12px;color:#8a9bc2">{_tr["detail"]}</div>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                with _fm_c2:
-                    # ── Druckenmiller ────────────────────────────────────────
-                    _dr = _fm["druck"]
-                    st.markdown(
-                        f'<div style="background:#161b27;border:1px solid #2a3348;'
-                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_druckenmiller_method}">'
-                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:4px">🎯 Druckenmiller Playbook</div>'
-                        f'<div style="font-size:12px;color:#f0b90b;margin-bottom:8px">{_dr["verdict"]}</div>'
-                        + "".join(f'<div style="font-size:12px;color:#cdd6f4;padding:1px 0">{e} {m}</div>'
-                                  for e, m in _dr.get("points", []))
-                        + '</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    # ── Kelly sizing ─────────────────────────────────────────
-                    _ke = _fm["kelly"]
-                    if _ke.get("kelly") is not None:
-                        _ke_c = "#16c784" if _ke["kelly"] > 0 else "#ea3a44"
-                        st.markdown(
-                            f'<div style="background:#161b27;border:1px solid #2a3348;'
-                            f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_kelly_method}">'
-                            f'<div style="font-weight:700;color:#e8edf8;margin-bottom:6px">🎲 Kelly Position Sizing</div>'
-                            f'<div style="font-size:12px;color:#cdd6f4">'
-                            f'Monthly win rate <b>{_ke["win_rate"]}%</b> · payoff ratio <b>{_ke["payoff"]}</b> '
-                            f'({_ke["n_months"]} months)</div>'
-                            f'<div style="font-size:13px;margin-top:6px">Full Kelly: '
-                            f'<b style="color:{_ke_c}">{_ke["kelly"]}%</b> of capital · '
-                            f'Half-Kelly (practical): <b style="color:{_ke_c}">{_ke["half_kelly"]}%</b></div>'
-                            f'<div style="font-size:11px;color:#556070;margin-top:4px">{_ke["note"]}</div>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        st.info(f"Kelly sizing: {_ke.get('note', 'unavailable')}")
-
-                    # ── Factor profile radar ─────────────────────────────────
-                    _fac = _fm["factors"]
-                    _f_names = list(_fac["scores"].keys())
-                    _f_vals  = list(_fac["scores"].values())
-                    _fig_rad = go.Figure(go.Scatterpolar(
-                        r=_f_vals + [_f_vals[0]],
-                        theta=_f_names + [_f_names[0]],
-                        fill="toself", fillcolor="rgba(77,163,255,0.15)",
-                        line=dict(color="#4da3ff", width=2),
-                    ))
-                    _fig_rad.update_layout(
-                        polar=dict(
-                            bgcolor="#0e1117",
-                            radialaxis=dict(range=[0, 10], gridcolor="#1e2535",
-                                            tickfont=dict(size=9, color="#556070")),
-                            angularaxis=dict(gridcolor="#1e2535",
-                                             tickfont=dict(size=11, color="#cdd6f4")),
-                        ),
-                        paper_bgcolor="#0e1117", height=280,
-                        margin=dict(l=40, r=40, t=25, b=25), showlegend=False,
-                        title=dict(text="Factor Profile", font=dict(size=12, color="#cdd6f4"), x=0),
-                    )
-                    st.plotly_chart(_fig_rad, use_container_width=True,
-                                    config={"displayModeBar": False})
-                    st.markdown("**Style fit:**", help=mod_gloss.tip("factor_method"))
-                    for _sf in _fac["style_fits"]:
-                        st.markdown(f"- {_sf}")
-
-                # ── 🎓 Guru Checklists (full-width, below the two columns) ───
-                st.markdown("---")
-                st.subheader("🎓 Guru Checklists — the legends, mechanically applied")
-                st.caption("Hover any card title for who invented the method, how it's computed, "
-                           "and what the verdict means.")
                 _tip_g = {k: _html.escape(mod_gloss.tip(k), quote=True)
                           for k in ("buffett_method", "munger_method", "lynch_method",
                                     "graham_method", "greenblatt_method", "canslim_method",
@@ -3191,7 +3203,7 @@ if page == "🔍 Analyze":
 
                 def _guru_card(title, tip_key, verdict, verdict_color, body_html):
                     return (
-                        f'<div style="background:#161b27;border:1px solid #2a3348;'
+                        f'<div style="background:var(--panel);border:1px solid var(--border);'
                         f'border-left:4px solid {verdict_color};border-radius:8px;'
                         f'padding:14px 18px;margin-bottom:10px;cursor:help" '
                         f'title="{_tip_g[tip_key]}">'
@@ -3344,196 +3356,573 @@ if page == "🔍 Analyze":
                         "templeton_method", _tm["verdict"], _tm_c, _tm_body),
                         unsafe_allow_html=True)
 
-        # ── Risk & Sizing (trader's risk-first workflow) ─────────────────────
-        with tab_risk:
-            st.subheader(f"🛡 Risk & Sizing — {symbol}")
-
-            # ── 1. Trade Planner ─────────────────────────────────────────────
-            st.markdown("#### 📐 Trade Planner — position sizing from risk, not conviction")
-            st.caption("Van Tharp 1R method: decide how much you're willing to LOSE first, "
-                       "place the stop at a technical level, and the position size falls out.")
-
-            _ti = mod_rt.get_trade_inputs(symbol)
-            if _ti.get("error"):
-                st.info(f"Trade planner unavailable: {_ti['error']}")
+            _tip_minervini_method = _html.escape(mod_gloss.tip("minervini_method"), quote=True)
+            _tip_turtle_method = _html.escape(mod_gloss.tip("turtle_method"), quote=True)
+            _tip_trend_following_method = _html.escape(mod_gloss.tip("trend_following_method"), quote=True)
+            _tip_druckenmiller_method = _html.escape(mod_gloss.tip("druckenmiller_method"), quote=True)
+            _tip_kelly_method = _html.escape(mod_gloss.tip("kelly_method"), quote=True)
+            if _fm.get("error"):
+                st.info(f"Fund models unavailable: {_fm['error']}")
             else:
-                _tp_c1, _tp_c2, _tp_c3, _tp_c4 = st.columns(4)
-                with _tp_c1:
-                    _acct = st.number_input("Account size ($)", value=50_000, step=5_000,
-                                            key=f"_rt_acct_{symbol}")
-                with _tp_c2:
-                    _riskp = st.slider("Risk per trade (%)", 0.25, 3.0, 1.0, 0.25,
-                                       key=f"_rt_risk_{symbol}",
-                                       help="Pros risk 0.5-2% of the account per trade")
-                with _tp_c3:
-                    _stop_mode = st.selectbox("Stop placement",
-                                              ["2× ATR", "3× ATR", "Swing low (10d)", "Manual"],
-                                              key=f"_rt_stopm_{symbol}")
-                with _tp_c4:
-                    _tgt = st.number_input("Target price ($)",
-                                           value=round(_ti["price"] * 1.25, 2),
-                                           step=1.0, key=f"_rt_tgt_{symbol}")
+                _fm_c1, _fm_c2 = st.columns(2)
 
-                _stop_manual = None
-                if _stop_mode == "Manual":
-                    _stop_manual = st.number_input("Manual stop ($)",
-                                                   value=round(_ti["price"] * 0.92, 2),
-                                                   step=0.5, key=f"_rt_stopv_{symbol}")
-                elif _stop_mode == "Swing low (10d)":
-                    _stop_manual = _ti["swing_low"] * 0.995   # just under the swing low
+                # ── Minervini Trend Template ─────────────────────────────────
+                with _fm_c1:
+                    _min = _fm["minervini"]
+                    _min_pass = _min["passed"]
+                    _min_c = "#16c784" if _min_pass == 7 else ("#f0b90b" if _min_pass >= 5 else "#ea3a44")
+                    st.markdown(
+                        f'<div style="background:var(--panel);border:1px solid var(--border);border-left:4px solid {_min_c};'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" '
+                        f'title="{_tip_minervini_method}">'
+                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:2px">'
+                        f'📈 Minervini Trend Template <span style="color:{_min_c}">'
+                        f'{_min_pass}/{_min["total"]}</span></div>'
+                        f'<div style="font-size:12px;color:#8a9bc2;margin-bottom:8px">{_min["verdict"]}</div>'
+                        + "".join(
+                            f'<div style="font-size:12px;color:{"#16c784" if ok else "#ea3a44"};'
+                            f'padding:1px 0">{"✓" if ok else "✗"} {lbl}</div>'
+                            for lbl, ok in _min["checks"]
+                        ) + '</div>',
+                        unsafe_allow_html=True,
+                    )
 
-                _plan_rt = mod_rt.trade_plan(
-                    _ti["price"], _ti["atr"], float(_acct), float(_riskp),
-                    atr_mult=3.0 if _stop_mode == "3× ATR" else 2.0,
-                    target_price=float(_tgt) if _tgt else None,
-                    stop_price=_stop_manual,
+                    # ── Turtle / Donchian ────────────────────────────────────
+                    _tur = _fm["turtle"]
+                    st.markdown(
+                        f'<div style="background:var(--panel);border:1px solid var(--border);'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_turtle_method}">'
+                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:6px">🐢 Turtle Breakout Rules</div>'
+                        f'<div style="font-size:12px;color:#cdd6f4">System 1 (20d): {_tur["s1"]}</div>'
+                        f'<div style="font-size:12px;color:#cdd6f4">System 2 (55d): {_tur["s2"]}</div>'
+                        + (f'<div style="font-size:11px;color:#556070;margin-top:6px">'
+                           f'20d high ${_tur["hi20"]:,.2f} · 55d high ${_tur["hi55"]:,.2f} · '
+                           f'exit lows ${_tur["lo10"]:,.2f}/${_tur["lo20"]:,.2f}</div>'
+                           if _tur.get("hi20") else "")
+                        + '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # ── Trend following ──────────────────────────────────────
+                    _tr = _fm["trend"]
+                    _tr_c = {"LONG": "#16c784", "SHORT/AVOID": "#ea3a44",
+                             "MIXED": "#f0b90b"}.get(_tr["signal"], "#556070")
+                    st.markdown(
+                        f'<div style="background:var(--panel);border:1px solid var(--border);'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_trend_following_method}">'
+                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:4px">'
+                        f'📉 Managed-Futures Trend: <span style="color:{_tr_c}">{_tr["signal"]}</span></div>'
+                        f'<div style="font-size:12px;color:#8a9bc2">{_tr["detail"]}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                with _fm_c2:
+                    # ── Druckenmiller ────────────────────────────────────────
+                    _dr = _fm["druck"]
+                    st.markdown(
+                        f'<div style="background:var(--panel);border:1px solid var(--border);'
+                        f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_druckenmiller_method}">'
+                        f'<div style="font-weight:700;color:#e8edf8;margin-bottom:4px">🎯 Druckenmiller Playbook</div>'
+                        f'<div style="font-size:12px;color:#f0b90b;margin-bottom:8px">{_dr["verdict"]}</div>'
+                        + "".join(f'<div style="font-size:12px;color:#cdd6f4;padding:1px 0">{e} {m}</div>'
+                                  for e, m in _dr.get("points", []))
+                        + '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # ── Kelly sizing ─────────────────────────────────────────
+                    _ke = _fm["kelly"]
+                    if _ke.get("kelly") is not None:
+                        _ke_c = "#16c784" if _ke["kelly"] > 0 else "#ea3a44"
+                        st.markdown(
+                            f'<div style="background:var(--panel);border:1px solid var(--border);'
+                            f'border-radius:8px;padding:14px 18px;margin-bottom:10px;cursor:help" title="{_tip_kelly_method}">'
+                            f'<div style="font-weight:700;color:#e8edf8;margin-bottom:6px">🎲 Kelly Position Sizing</div>'
+                            f'<div style="font-size:12px;color:#cdd6f4">'
+                            f'Monthly win rate <b>{_ke["win_rate"]}%</b> · payoff ratio <b>{_ke["payoff"]}</b> '
+                            f'({_ke["n_months"]} months)</div>'
+                            f'<div style="font-size:13px;margin-top:6px">Full Kelly: '
+                            f'<b style="color:{_ke_c}">{_ke["kelly"]}%</b> of capital · '
+                            f'Half-Kelly (practical): <b style="color:{_ke_c}">{_ke["half_kelly"]}%</b></div>'
+                            f'<div style="font-size:11px;color:#556070;margin-top:4px">{_ke["note"]}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.info(f"Kelly sizing: {_ke.get('note', 'unavailable')}")
+
+                    # ── Factor profile radar ─────────────────────────────────
+                    _fac = _fm["factors"]
+                    _f_names = list(_fac["scores"].keys())
+                    _f_vals  = list(_fac["scores"].values())
+                    _fig_rad = go.Figure(go.Scatterpolar(
+                        r=_f_vals + [_f_vals[0]],
+                        theta=_f_names + [_f_names[0]],
+                        fill="toself", fillcolor="rgba(77,163,255,0.15)",
+                        line=dict(color="#4da3ff", width=2),
+                    ))
+                    _fig_rad.update_layout(
+                        polar=dict(
+                            bgcolor="#0e1117",
+                            radialaxis=dict(range=[0, 10], gridcolor="#1e2535",
+                                            tickfont=dict(size=9, color="#556070")),
+                            angularaxis=dict(gridcolor="#1e2535",
+                                             tickfont=dict(size=11, color="#cdd6f4")),
+                        ),
+                        paper_bgcolor="#0e1117", height=280,
+                        margin=dict(l=40, r=40, t=25, b=25), showlegend=False,
+                        title=dict(text="Factor Profile", font=dict(size=12, color="#cdd6f4"), x=0),
+                    )
+                    st.plotly_chart(_fig_rad, use_container_width=True,
+                                    config={"displayModeBar": False})
+                    st.markdown("**Style fit:**", help=mod_gloss.tip("factor_method"))
+                    for _sf in _fac["style_fits"]:
+                        st.markdown(f"- {_sf}")
+
+
+        # ── Seasonality ──────────────────────────────────────────────────────────
+        with tab_seasonal:
+            st.subheader("📅 Monthly Seasonality")
+            st.caption("Historical average monthly returns based on 10 years of data. Past patterns do not guarantee future returns.")
+
+            with st.spinner("Loading seasonality data..."):
+                _seas = mod_seasonal.get_seasonality(symbol, years=10)
+
+            if not _seas or not _seas.get("monthly"):
+                st.info("Seasonality data unavailable for this symbol.")
+            else:
+                _MNAMES = mod_seasonal.MONTH_NAMES
+                _monthly  = _seas["monthly"]
+                _best_m   = _seas["best_month"]
+                _worst_m  = _seas["worst_month"]
+                _cur_m    = _seas["current_month"]
+                _yrs      = _seas["years_analyzed"]
+
+                # Hero cards
+                _c1, _c2, _c3, _c4 = st.columns(4)
+                with _c1:
+                    _bm = _monthly[_best_m]
+                    st.metric("Best Month", _MNAMES[_best_m - 1],
+                              f"+{_bm['avg_return']*100:.1f}% avg · {_bm['win_rate']*100:.0f}% win rate")
+                with _c2:
+                    _wm = _monthly[_worst_m]
+                    st.metric("Worst Month", _MNAMES[_worst_m - 1],
+                              f"{_wm['avg_return']*100:.1f}% avg · {_wm['win_rate']*100:.0f}% win rate")
+                with _c3:
+                    _cm = _monthly.get(_cur_m, {})
+                    _cm_avg = _cm.get("avg_return", 0)
+                    _cm_wr  = _cm.get("win_rate", 0)
+                    _cm_lbl = f"{_cm_avg*100:+.1f}% avg · {_cm_wr*100:.0f}% win rate" if _cm else "No data"
+                    st.metric(f"This Month ({_MNAMES[_cur_m-1]})", "Current", _cm_lbl)
+                with _c4:
+                    st.metric("Data Range", f"{_yrs} years", "Monthly close-to-close")
+
+                # Monthly bar chart
+                _avgs   = [_monthly.get(m, {}).get("avg_return", 0) * 100 for m in range(1, 13)]
+                _wrates = [_monthly.get(m, {}).get("win_rate", 0) * 100   for m in range(1, 13)]
+                _medns  = [_monthly.get(m, {}).get("median", 0) * 100     for m in range(1, 13)]
+                _cnts   = [_monthly.get(m, {}).get("count", 0)            for m in range(1, 13)]
+                _bar_colors = ["#16c784" if a >= 0 else "#ea3a44" for a in _avgs]
+
+                _fig_seas = go.Figure()
+                _fig_seas.add_trace(go.Bar(
+                    x=_MNAMES, y=_avgs,
+                    marker_color=_bar_colors,
+                    text=[f"{a:+.1f}%" for a in _avgs],
+                    textposition="outside",
+                    customdata=list(zip(_wrates, _medns, _cnts)),
+                    hovertemplate=(
+                        "<b>%{x}</b><br>"
+                        "Avg Return: %{y:+.2f}%<br>"
+                        "Win Rate: %{customdata[0]:.0f}%<br>"
+                        "Median: %{customdata[1]:+.2f}%<br>"
+                        "Years: %{customdata[2]}<extra></extra>"
+                    ),
+                ))
+                _fig_seas.update_layout(
+                    title=dict(text=f"{symbol} — Average Monthly Return ({_yrs}Y)", font=dict(color="#b0bec5")),
+                    plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+                    font=dict(color="#b0bec5", family="IBM Plex Mono, monospace", size=11),
+                    yaxis=dict(ticksuffix="%", gridcolor="#1e2738", zerolinecolor="#2a3348"),
+                    xaxis=dict(gridcolor="#1e2738"),
+                    height=330, margin=dict(l=0, r=0, t=40, b=0),
+                    showlegend=False,
                 )
-                if _plan_rt.get("error"):
-                    st.error(_plan_rt["error"])
-                else:
-                    _rr = _plan_rt.get("reward_risk")
-                    _rr_c = "#16c784" if (_rr or 0) >= 2 else "#ea3a44"
-                    _rm1, _rm2, _rm3, _rm4, _rm5, _rm6 = st.columns(6)
-                    _rm1.metric("Entry", f"${_ti['price']:,.2f}")
-                    _rm2.metric("Stop", f"${_plan_rt['stop_price']:,.2f}",
-                                f"-{_plan_rt['stop_dist_pct']:.1f}%", delta_color="off",
-                                help=mod_gloss.tip("stop_loss"))
-                    _rm3.metric("Shares", f"{_plan_rt['shares']:,}",
-                                help=mod_gloss.tip("position_sizing"))
-                    _rm4.metric("Position", f"${_plan_rt['position_usd']:,.0f}",
-                                f"{_plan_rt['position_pct']:.1f}% of acct", delta_color="off")
-                    _rm5.metric("1R (risk)", f"${_plan_rt['risk_budget']:,.0f}",
-                                help=mod_gloss.tip("r_multiple"))
-                    _rm6.metric("Reward/Risk", f"{_rr:.1f}R" if _rr else "—",
-                                help=mod_gloss.tip("reward_risk"))
-                    if _plan_rt.get("chandelier"):
-                        st.caption(f"🕯 Chandelier trailing stop (3×ATR): "
-                                   f"**${_plan_rt['chandelier']:,.2f}** — raise it as the price rises, never lower it.")
-                    for _w in _plan_rt.get("warnings", []):
-                        st.warning(_w)
+                st.plotly_chart(_fig_seas, use_container_width=True)
 
-            # ── 2. Portfolio Fit ─────────────────────────────────────────────
-            st.markdown("---")
-            st.markdown("#### 🧩 Portfolio Fit — diversifier or duplicate?")
-            _fit_src = []
-            try:
-                _tp_all = mod_tp.load_all()["portfolios"]
-                for _fit_name, _fit_tp in _tp_all.items():
-                    _fit_src.append((f"Tracker: {_fit_name}", tuple(sorted(_fit_tp["positions"].keys()))))
-            except Exception:
-                pass
-            try:
-                _pp_all = mod_pp.load_all()["portfolios"]
-                for _fit_name, _fit_pp in _pp_all.items():
-                    if _fit_pp.get("holdings"):
-                        _fit_src.append((f"Paper: {_fit_name}", tuple(sorted(_fit_pp["holdings"].keys()))))
-            except Exception:
-                pass
+                # Heatmap table
+                _hmap = _seas.get("heatmap", {})
+                if _hmap:
+                    _all_returns = [v for yr in _hmap.values() for v in yr.values() if v is not None]
+                    _max_abs = max(abs(r) for r in _all_returns) if _all_returns else 0.1
 
-            if not _fit_src:
-                st.info("No tracked or paper portfolios with holdings — build one to check fit.")
-            else:
-                _fit_choice = st.selectbox("Compare against", [n for n, _ in _fit_src],
-                                           key=f"_rt_fit_{symbol}")
-                _fit_syms = dict(_fit_src)[_fit_choice]
-                with st.spinner("Computing correlations..."):
-                    _fit = mod_rt.portfolio_fit(symbol, _fit_syms)
-                if _fit.get("error"):
-                    st.info(_fit["error"])
-                else:
-                    _fc1, _fc2, _fc3 = st.columns(3)
-                    _fc1.metric("Beta vs SPY", f"{_fit['beta']:.2f}" if _fit["beta"] is not None else "—",
-                                help=mod_gloss.tip("beta"))
-                    _fc2.metric("Avg Correlation", f"{_fit['avg_corr']:.2f}" if _fit["avg_corr"] is not None else "—",
-                                help=mod_gloss.tip("correlation"))
-                    if _fit.get("max_corr"):
-                        _fc3.metric("Most Correlated", f"{_fit['max_corr']['symbol']} "
-                                    f"({_fit['max_corr']['corr']:.2f})")
-                    _v_c = ("#ea3a44" if "DUPLICATES" in _fit["verdict"] else
-                            "#f0b90b" if "PARTIAL" in _fit["verdict"] else "#16c784")
+                    def _hmap_color(ret):
+                        if ret is None:
+                            return "#1e2738", "#556070"
+                        intensity = min(abs(ret) / (_max_abs + 0.001), 1.0)
+                        if ret > 0:
+                            g_val = int(100 + 100 * intensity)
+                            return f"rgba(22,{g_val},100,{0.15 + 0.5*intensity})", "#16c784"
+                        else:
+                            r_val = int(150 + 80 * intensity)
+                            return f"rgba({r_val},58,68,{0.15 + 0.5*intensity})", "#ea3a44"
+
+                    _header_cells = "".join(
+                        f'<th style="padding:4px 6px;font-size:10px;color:#556070;'
+                        f'font-family:IBM Plex Mono,monospace;text-align:center">{mn[:3]}</th>'
+                        for mn in _MNAMES
+                    )
+                    _rows_html = ""
+                    for yr in sorted(_hmap.keys(), reverse=True):
+                        _row_cells = ""
+                        for m in range(1, 13):
+                            ret = _hmap[yr].get(m)
+                            bg, fg = _hmap_color(ret)
+                            val_str = f"{ret*100:+.1f}%" if ret is not None else "—"
+                            _row_cells += (
+                                f'<td style="padding:3px 5px;font-size:11px;font-family:IBM Plex Mono,monospace;'
+                                f'color:{fg};background:{bg};text-align:center;border-radius:3px">{val_str}</td>'
+                            )
+                        _rows_html += (
+                            f'<tr><td style="padding:3px 8px;font-size:11px;color:#b0bec5;'
+                            f'font-family:IBM Plex Mono,monospace;white-space:nowrap">{yr}</td>'
+                            f'{_row_cells}</tr>'
+                        )
+
                     st.markdown(
-                        f'<div style="background:{_v_c}18;border:1px solid {_v_c}50;border-radius:8px;'
-                        f'padding:10px 16px;color:{_v_c};font-weight:600">{_fit["verdict"]}</div>',
+                        f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;'
+                        f'padding:12px 16px;margin-top:8px;overflow-x:auto">'
+                        f'<div style="font-size:10px;font-family:IBM Plex Mono,monospace;color:#16c784;'
+                        f'text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">'
+                        f'MONTHLY RETURN HEATMAP — {symbol} — {_yrs} YEARS</div>'
+                        f'<table style="width:100%;border-collapse:separate;border-spacing:2px">'
+                        f'<thead><tr><th style="padding:4px 8px;font-size:10px;color:#556070;'
+                        f'font-family:IBM Plex Mono,monospace;text-align:left">YEAR</th>'
+                        f'{_header_cells}</tr></thead>'
+                        f'<tbody>{_rows_html}</tbody></table></div>',
                         unsafe_allow_html=True,
                     )
-                    if _fit["corrs"]:
-                        _corr_strip = " · ".join(f"{c['symbol']} {c['corr']:.2f}"
-                                                 for c in _fit["corrs"][:8])
-                        st.caption(f"Pairwise (6mo daily): {_corr_strip}")
 
-                    # ── What-If: add this stock at X% ────────────────────────
-                    st.markdown("##### 🧪 What-If — add it and see what happens")
-                    _wi_pct = st.slider(f"Add {symbol} at (% of portfolio)", 2, 20, 8, 1,
-                                        key=f"_wi_pct_{symbol}",
-                                        help="Existing positions are scaled down proportionally to make room.")
-                    if st.button("Simulate", key=f"_wi_btn_{symbol}"):
-                        # Equal-weight assumption for paper holdings; tracker uses target weights
-                        _wi_holdings = []
-                        try:
-                            if _fit_choice.startswith("Tracker: "):
-                                _wi_tp = mod_tp.load_all()["portfolios"][_fit_choice[9:]]
-                                _wi_holdings = tuple((s, p["target_weight"] / 100)
-                                                     for s, p in _wi_tp["positions"].items())
-                            else:
-                                _n = len(_fit_syms)
-                                _wi_holdings = tuple((s, 1 / _n) for s in _fit_syms)
-                        except Exception:
-                            pass
-                        if _wi_holdings:
-                            with st.spinner("Simulating portfolio impact..."):
-                                _wi = mod_rt.what_if(_wi_holdings, symbol, float(_wi_pct))
-                            if _wi.get("error"):
-                                st.info(_wi["error"])
-                            else:
-                                _wb, _wa = _wi["before"], _wi["after"]
-                                def _delta_str(b, a, suffix="", invert=False):
-                                    if b is None or a is None:
-                                        return "—"
-                                    d = a - b
-                                    good = (d < 0) if invert else (d > 0)
-                                    c = "#16c784" if good else ("#ea3a44" if d != 0 else "#8a9bc2")
-                                    return (f'{b}{suffix} → <b style="color:{c}">{a}{suffix} '
-                                            f'({d:+.2f})</b>')
-                                st.markdown(
-                                    f'<div style="background:#161b27;border:1px solid #2a3348;'
-                                    f'border-radius:8px;padding:12px 16px;font-size:13px;'
-                                    f'color:#cdd6f4;line-height:2">'
-                                    f'Beta: {_delta_str(_wb["beta"], _wa["beta"], invert=True)}<br>'
-                                    f'Annual Vol: {_delta_str(_wb["vol"], _wa["vol"], "%", invert=True)}<br>'
-                                    f'Avg Correlation: {_delta_str(_wb["avg_corr"], _wa["avg_corr"], invert=True)}<br>'
-                                    f'Top Sector: {_html.escape(_wb["top_sector"])} {_wb["top_sector_pct"]}% → '
-                                    f'{_html.escape(_wa["top_sector"])} {_wa["top_sector_pct"]}%'
-                                    f'</div>',
-                                    unsafe_allow_html=True,
-                                )
-                                st.caption("Green = diversification improved (lower beta/vol/correlation). "
-                                           "Watch the top-sector line — adding a duplicate concentrates it.")
+        # ── 13F Smart Money ───────────────────────────────────────────────────────
+        with tab_13f:
+            st.subheader("🏛 13F Smart Money Tracker")
+            st.caption(
+                f"Institutional 13F filings from {len(mod_13f.FAMOUS_FUNDS)} famous hedge funds. "
+                "Data is ~45 days delayed (SEC mandatory filing deadline). "
+                "Change vs. prior quarter."
+            )
 
-            # ── 3. Earnings Quality ──────────────────────────────────────────
-            st.markdown("---")
-            st.markdown("#### 🔬 Earnings Quality — forensic red flags (short-seller lens)")
-            _eq = mod_eq.analyze(symbol)
-            if _eq.get("error"):
-                st.info(_eq["error"])
-            elif not _eq["checks"]:
-                st.info("No financial statement data available.")
+            with st.spinner("Fetching 13F filings from SEC EDGAR... (~15s on first load, cached 24h)"):
+                _stock_long_name = info.get("longName") or info.get("shortName") or symbol
+                _smart_money = mod_13f.get_smart_money_for_stock(symbol, _stock_long_name)
+
+            if not _smart_money:
+                st.info(
+                    f"No tracked funds held **{symbol}** in the latest quarter. "
+                    f"Tracked funds: {', '.join(mod_13f.FAMOUS_FUNDS.keys())}."
+                )
             else:
-                if _eq.get("score") is not None:
-                    _eq_c = ("#16c784" if _eq["score"] >= 7.5 else
-                             "#f0b90b" if _eq["score"] >= 5 else "#ea3a44")
+                _sm_rows = ""
+                for _sm in _smart_money:
+                    _sm_rows += (
+                        f'<tr>'
+                        f'<td style="padding:6px 10px;font-family:IBM Plex Mono,monospace;'
+                        f'font-weight:700;color:#e8eaf6;white-space:nowrap">{_sm["fund"]}</td>'
+                        f'<td style="padding:6px 10px;color:#8a9bc2;font-size:12px">{_sm["style"]}</td>'
+                        f'<td style="padding:6px 10px;font-family:IBM Plex Mono,monospace;'
+                        f'color:#b0bec5;text-align:right">{_sm["shares_fmt"]}</td>'
+                        f'<td style="padding:6px 10px;font-family:IBM Plex Mono,monospace;'
+                        f'color:#b0bec5;text-align:right">{_sm["value_fmt"]}</td>'
+                        f'<td style="padding:6px 10px;font-family:IBM Plex Mono,monospace;'
+                        f'font-weight:700;color:{_sm["change_color"]};white-space:nowrap">'
+                        f'{_sm["change_label"]}</td>'
+                        f'<td style="padding:6px 10px;color:#556070;font-size:11px;white-space:nowrap">'
+                        f'{_sm["filing_date"]}</td>'
+                        f'</tr>'
+                    )
+
+                st.markdown(
+                    f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;'
+                    f'padding:12px 16px;margin-top:8px;overflow-x:auto">'
+                    f'<div style="font-size:10px;font-family:IBM Plex Mono,monospace;color:#16c784;'
+                    f'text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;cursor:help" '
+                    f'title="{_html.escape(mod_gloss.tip("13f"), quote=True)}">'
+                    f'13F SMART MONEY · {len(_smart_money)} TRACKED FUND{"S" if len(_smart_money)>1 else ""} '
+                    f'HOLDING {symbol} · SEC EDGAR ⓘ</div>'
+                    f'<table style="width:100%;border-collapse:collapse">'
+                    f'<thead><tr>'
+                    f'<th style="text-align:left;font-size:10px;color:#556070;padding:2px 10px;'
+                    f'font-family:IBM Plex Mono,monospace">FUND</th>'
+                    f'<th style="text-align:left;font-size:10px;color:#556070;padding:2px 10px;'
+                    f'font-family:IBM Plex Mono,monospace">STYLE</th>'
+                    f'<th style="text-align:right;font-size:10px;color:#556070;padding:2px 10px;'
+                    f'font-family:IBM Plex Mono,monospace">SHARES</th>'
+                    f'<th style="text-align:right;font-size:10px;color:#556070;padding:2px 10px;'
+                    f'font-family:IBM Plex Mono,monospace">VALUE</th>'
+                    f'<th style="text-align:left;font-size:10px;color:#556070;padding:2px 10px;'
+                    f'font-family:IBM Plex Mono,monospace">CHANGE</th>'
+                    f'<th style="text-align:left;font-size:10px;color:#556070;padding:2px 10px;'
+                    f'font-family:IBM Plex Mono,monospace">FILED</th>'
+                    f'</tr></thead>'
+                    f'<tbody>{_sm_rows}</tbody>'
+                    f'</table></div>',
+                    unsafe_allow_html=True,
+                )
+
+                st.caption(
+                    "Source: SEC EDGAR 13F-HR filings. "
+                    "Data reflects Q-end positions filed ~45 days later. "
+                    "Change = vs. prior quarter filing."
+                )
+
+        # ── DCF Valuation (dcf-valuation skill) ──────────────────────────────
+        with tab_dcf:
+            st.subheader(f"💎 DCF Intrinsic Value — {symbol}")
+            st.caption("Two-stage discounted-cash-flow model: 5-year FCF projection + Gordon "
+                       "terminal value. Adjust assumptions below — defaults come from the "
+                       "stock's own history.")
+
+            _dcf_in = mod_dcf.get_dcf_inputs(symbol)
+            if _dcf_in.get("error"):
+                st.info(f"DCF unavailable: {_dcf_in['error']}")
+
+            elif _dcf_in.get("is_financial"):
+                st.info("🏦 Financial-sector company — bank/insurer cash-flow statements mix "
+                        "loan-book, trading-securities and reserve movements into 'Free Cash "
+                        "Flow', so a standard FCF DCF isn't meaningful here. Valuing the "
+                        "dividend stream instead (Dividend Discount Model).")
+                _dps = _dcf_in.get("dividend_rate")
+                if not _dps:
+                    st.warning("No dividend data available — can't run a DDM either.")
+                else:
+                    _ddm1, _ddm2 = st.columns(2)
+                    with _ddm1:
+                        _beta_def = _dcf_in.get("beta") or 1.0
+                        _rf = mod_dcf.get_risk_free_rate()
+                        _coe_def = _rf + float(_beta_def) * 0.045
+                        _coe = st.slider("Cost of equity (%)", 4.0, 18.0,
+                                          round(_coe_def * 100, 1), 0.5,
+                                          key=f"_ddm_coe_{symbol}",
+                                          help=f"Default = 10Y yield ({_rf*100:.1f}%) + "
+                                               f"beta × 4.5% equity premium") / 100
+                    with _ddm2:
+                        _roe = _dcf_in.get("roe")
+                        _payout = _dcf_in.get("payout_ratio")
+                        _sustain_g = (_roe * (1 - _payout)) \
+                            if (_roe is not None and _payout is not None) else 0.03
+                        _sustain_g = max(0.0, min(_coe - 0.005, _sustain_g))
+                        _ddm_g = st.slider("Dividend growth (%)", 0.0,
+                                            max(0.5, min(10.0, _coe * 100 - 0.5)),
+                                            round(_sustain_g * 100, 1), 0.25,
+                                            key=f"_ddm_g_{symbol}",
+                                            help="Suggested = ROE × retention ratio "
+                                                 "(sustainable growth rate)") / 100
+                    _ddm_res = mod_dcf.run_ddm(_dps, _ddm_g, _coe)
+                    if _ddm_res.get("error"):
+                        st.error(_ddm_res["error"])
+                    else:
+                        _iv = _ddm_res["intrinsic_ps"]
+                        _px = _dcf_in["price"]
+                        _ups = (_iv / _px - 1) * 100 if _px > 0 else 0
+                        _ups_c = "#16c784" if _ups > 15 else ("#ea3a44" if _ups < -15 else "#f0b90b")
+                        _verdict = ("UNDERVALUED" if _ups > 15 else
+                                    "OVERVALUED" if _ups < -15 else "FAIRLY VALUED")
+                        _dm1, _dm2, _dm3 = st.columns(3)
+                        _dm1.metric("Intrinsic Value (DDM)", f"${_iv:,.2f}")
+                        _dm2.metric("Market Price", f"${_px:,.2f}")
+                        _dm3.metric("Upside / Downside", f"{_ups:+.1f}%")
+                        st.markdown(
+                            f'<div style="background:{_ups_c}18;border:1px solid {_ups_c}50;'
+                            f'border-radius:8px;padding:10px 16px;margin:8px 0;'
+                            f'color:{_ups_c};font-weight:700;'
+                            f'font-family:IBM Plex Mono,monospace">'
+                            f'{_verdict} by DDM at these assumptions</div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.caption(f"Next-year dividend: ${_ddm_res['next_dps']:,.2f}/share · "
+                                   f"Sustainable growth ≈ ROE × retention ratio.")
+
+            elif _dcf_in.get("negative_fcf"):
+                _rev = _dcf_in.get("revenue_ttm")
+                if not _rev:
+                    st.warning("This company has negative free cash flow and no revenue data "
+                               "available for a path-to-profitability estimate.")
+                else:
+                    st.info("📈 Negative free cash flow today — a standard DCF would explode. "
+                            "Instead, this projects revenue forward and ramps the FCF margin to "
+                            "an assumed mature-state level, answering \"what is this worth once "
+                            "it reaches a normal margin.\"")
+                    _cur_margin = _dcf_in.get("current_fcf_margin")
+                    if _cur_margin is None:
+                        _cur_margin = -0.10
+                    _rc1, _rc2, _rc3 = st.columns(3)
+                    with _rc1:
+                        _rev_g_def = _dcf_in.get("revenue_growth") or 0.15
+                        _rev_g = st.slider("Revenue growth (5y, %/yr)", 0.0, 60.0,
+                                            float(min(60.0, max(3.0, _rev_g_def * 100))), 1.0,
+                                            key=f"_rdcf_g_{symbol}") / 100
+                    with _rc2:
+                        _target_m = st.slider("Target FCF margin at maturity (%)", 0.0, 35.0,
+                                               15.0, 1.0, key=f"_rdcf_m_{symbol}",
+                                               help="What % of revenue becomes free cash flow "
+                                                    "once the business matures. 15% is a "
+                                                    "reasonable software/SaaS default — adjust "
+                                                    "for the sector.") / 100
+                    with _rc3:
+                        _rdcf_wacc = st.slider("Discount rate / WACC (%)", 6.0, 20.0, 12.0, 0.5,
+                                                key=f"_rdcf_w_{symbol}") / 100
+                    _rdcf_gt = 0.025
+                    _rdcf_res = mod_dcf.run_revenue_dcf(
+                        _rev, _rev_g, _cur_margin, _target_m, _rdcf_gt, _rdcf_wacc,
+                        _dcf_in["net_debt"], _dcf_in["shares_out"],
+                    )
+                    if _rdcf_res.get("error"):
+                        st.error(_rdcf_res["error"])
+                    else:
+                        _iv = _rdcf_res["intrinsic_ps"]
+                        _px = _dcf_in["price"]
+                        _ups = (_iv / _px - 1) * 100 if _px > 0 else 0
+                        _ups_c = "#16c784" if _ups > 15 else ("#ea3a44" if _ups < -15 else "#f0b90b")
+                        _verdict = ("UNDERVALUED" if _ups > 15 else
+                                    "OVERVALUED" if _ups < -15 else "FAIRLY VALUED")
+                        _dm1, _dm2, _dm3, _dm4 = st.columns(4)
+                        _dm1.metric("Intrinsic Value", f"${_iv:,.2f}")
+                        _dm2.metric("Market Price", f"${_px:,.2f}")
+                        _dm3.metric("Upside / Downside", f"{_ups:+.1f}%")
+                        _dm4.metric("Current FCF Margin", f"{_cur_margin*100:+.1f}%",
+                                    help="Today's FCF ÷ revenue — negative means the business "
+                                         "still burns cash")
+                        st.markdown(
+                            f'<div style="background:{_ups_c}18;border:1px solid {_ups_c}50;'
+                            f'border-radius:8px;padding:10px 16px;margin:8px 0;'
+                            f'color:{_ups_c};font-weight:700;'
+                            f'font-family:IBM Plex Mono,monospace">'
+                            f'{_verdict} by revenue-bridge DCF at these assumptions</div>',
+                            unsafe_allow_html=True,
+                        )
+                        _rproj = _rdcf_res["fcf_projection"]
+                        _fig_rdcf = go.Figure()
+                        _fig_rdcf.add_trace(go.Bar(
+                            x=[f"Y{p['year']}" for p in _rproj],
+                            y=[p["revenue"] / 1e9 for p in _rproj],
+                            name="Projected Revenue", marker_color="#8a9bc2", opacity=0.6,
+                        ))
+                        _fig_rdcf.add_trace(go.Bar(
+                            x=[f"Y{p['year']}" for p in _rproj],
+                            y=[p["fcf"] / 1e9 for p in _rproj],
+                            name="Projected FCF (ramped margin)",
+                            marker_color="#4da3ff", opacity=0.9,
+                        ))
+                        _fig_rdcf.update_layout(
+                            barmode="group", height=240,
+                            margin=dict(l=0, r=0, t=10, b=0),
+                            paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                            font=dict(color="#cdd6f4"),
+                            yaxis=dict(title="$B", gridcolor="#1e2535"),
+                            legend=dict(orientation="h", y=1.1, x=0),
+                        )
+                        st.plotly_chart(_fig_rdcf, use_container_width=True,
+                                        config={"displayModeBar": False})
+                        st.caption("Margin ramps linearly from today's level to the target "
+                                   "by Year 5.")
+
+            else:
+                _dc1, _dc2, _dc3 = st.columns(3)
+                with _dc1:
+                    _g5 = st.slider("FCF growth (5y, %/yr)", -10.0, 40.0,
+                                    float(_dcf_in["suggested_g"] * 100), 0.5,
+                                    key=f"_dcf_g_{symbol}",
+                                    help="Suggested from historical FCF CAGR") / 100
+                with _dc2:
+                    _beta_def = _dcf_in.get("beta") or 1.0
+                    _wacc_def = min(15.0, max(7.0, 4.5 + 5.0 * float(_beta_def)))
+                    _wacc = st.slider("Discount rate / WACC (%)", 6.0, 18.0,
+                                      round(_wacc_def, 1), 0.5,
+                                      key=f"_dcf_w_{symbol}",
+                                      help="Default ≈ risk-free 4.5% + beta × 5% equity premium") / 100
+                with _dc3:
+                    _gt = st.slider("Terminal growth (%)", 0.0, 4.0, 2.5, 0.25,
+                                    key=f"_dcf_t_{symbol}") / 100
+
+                _dcf_res = mod_dcf.run_dcf(
+                    _dcf_in["base_fcf"], _g5, _gt, _wacc,
+                    _dcf_in["net_debt"], _dcf_in["shares_out"],
+                )
+                if _dcf_res.get("error"):
+                    st.error(_dcf_res["error"])
+                else:
+                    _iv    = _dcf_res["intrinsic_ps"]
+                    _px    = _dcf_in["price"]
+                    _ups   = (_iv / _px - 1) * 100 if _px > 0 else 0
+                    _ups_c = "#16c784" if _ups > 15 else ("#ea3a44" if _ups < -15 else "#f0b90b")
+                    _verdict = ("UNDERVALUED" if _ups > 15 else
+                                "OVERVALUED" if _ups < -15 else "FAIRLY VALUED")
+
+                    _dm1, _dm2, _dm3, _dm4 = st.columns(4)
+                    _dm1.metric("Intrinsic Value", f"${_iv:,.2f}",
+                                help=mod_gloss.tip("intrinsic_value"))
+                    _dm2.metric("Market Price", f"${_px:,.2f}")
+                    _dm3.metric("Upside / Downside", f"{_ups:+.1f}%",
+                                help=mod_gloss.tip("dcf"))
+                    _dm4.metric("Terminal Weight", f"{_dcf_res['terminal_weight']:.0f}%",
+                                help="Share of value from the terminal period. Above ~80% = "
+                                     "valuation highly sensitive to terminal assumptions.")
                     st.markdown(
-                        f'<div style="font-family:IBM Plex Mono,monospace;font-size:15px;'
-                        f'margin-bottom:8px">Quality Score: '
-                        f'<b style="color:{_eq_c}">{_eq["score"]}/10</b></div>',
+                        f'<div style="background:{_ups_c}18;border:1px solid {_ups_c}50;'
+                        f'border-radius:8px;padding:10px 16px;margin:8px 0;'
+                        f'color:{_ups_c};font-weight:700;font-family:IBM Plex Mono,monospace">'
+                        f'{_verdict} by DCF at these assumptions</div>',
                         unsafe_allow_html=True,
                     )
-                _eq_icons = {"good": "🟢", "warn": "🟡", "flag": "🔴", "na": "⚪"}
-                for _nm, _stt, _dt in _eq["checks"]:
-                    st.markdown(f"{_eq_icons.get(_stt,'⚪')} **{_nm}** — {_dt}")
-                st.caption("Checks: dilution, stock-comp burden, cash backing of earnings, "
-                           "receivables vs revenue, FCF conversion, debt trend. "
-                           "🔴 flags are what short sellers hunt for.")
 
+                    # FCF projection chart
+                    _proj = _dcf_res["fcf_projection"]
+                    _fig_dcf = go.Figure()
+                    _fig_dcf.add_trace(go.Bar(
+                        x=[f"Y{p['year']}" for p in _proj],
+                        y=[p["fcf"] / 1e9 for p in _proj],
+                        name="Projected FCF", marker_color="#4da3ff", opacity=0.8,
+                    ))
+                    _fig_dcf.add_trace(go.Bar(
+                        x=[f"Y{p['year']}" for p in _proj],
+                        y=[p["pv"] / 1e9 for p in _proj],
+                        name="Present Value", marker_color="#16c784", opacity=0.8,
+                    ))
+                    _fig_dcf.update_layout(
+                        barmode="group", height=240,
+                        margin=dict(l=0, r=0, t=10, b=0),
+                        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                        font=dict(color="#cdd6f4"),
+                        yaxis=dict(title="$B", gridcolor="#1e2535"),
+                        legend=dict(orientation="h", y=1.1, x=0),
+                    )
+                    st.plotly_chart(_fig_dcf, use_container_width=True,
+                                    config={"displayModeBar": False})
+
+                    # Sensitivity matrix
+                    st.markdown("**Sensitivity — Intrinsic Value per Share**",
+                                help="Each cell re-runs the DCF at a different growth/discount "
+                                     "assumption pair, so you can see how much the answer swings "
+                                     "when the inputs change — not just one number, a range.")
+                    st.caption("Rows (left) = FCF growth rate assumption · "
+                               "Columns (top) = discount rate / WACC assumption. "
+                               "Every cell is a full DCF re-run at that combination.")
+                    _sens = mod_dcf.sensitivity_matrix(
+                        _dcf_in["base_fcf"], _gt, _dcf_in["net_debt"],
+                        _dcf_in["shares_out"], _g5, _wacc,
+                    )
+                    def _sens_color(v):
+                        if pd.isna(v):
+                            return ""
+                        return ("color: #16c784" if v > _px * 1.15 else
+                                "color: #ea3a44" if v < _px * 0.85 else "color: #f0b90b")
+                    st.dataframe(
+                        _sens.style.format("${:,.0f}").map(_sens_color),
+                        use_container_width=True,
+                    )
+                    st.caption("Green = >15% above market price at those assumptions · "
+                               "Red = >15% below · Amber = near market price.")
 
 # ─── Page: Market Radar ────────────────────────────────────────────────────────
 elif page == "🌍 Market Radar":
@@ -3613,7 +4002,7 @@ elif page == "🌍 Market Radar":
                     _th_ins = "text-align:left;font-size:10px;color:#556070;padding:4px 12px;font-family:'IBM Plex Mono',monospace"
                     _tr_ins = "text-align:right;font-size:10px;color:#556070;padding:4px 12px;font-family:'IBM Plex Mono',monospace"
                     st.markdown(
-                        f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;'
+                        f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;'
                         f'padding:12px 16px;overflow-x:auto">'
                         f'<table style="width:100%;border-collapse:collapse"><thead><tr>'
                         f'<th style="{_th_ins}">SYMBOL</th>'
@@ -3670,7 +4059,7 @@ elif page == "🌍 Market Radar":
                     )
                 _th_sen = "text-align:left;font-size:10px;color:#556070;padding:4px 10px;font-family:'IBM Plex Mono',monospace"
                 st.markdown(
-                    f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;'
+                    f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;'
                     f'padding:12px 16px;overflow-x:auto">'
                     f'<table style="width:100%;border-collapse:collapse"><thead><tr>'
                     f'<th style="{_th_sen}">TX DATE</th><th style="{_th_sen}">SYMBOL</th>'
@@ -3991,7 +4380,7 @@ elif page == "💼 Portfolio":
                         h1, h2 = st.columns([1, 2])
                         with h1:
                             st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:12px;
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;
             padding:24px;text-align:center">
   <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#8a9bc2;
               text-transform:uppercase;letter-spacing:1.2px;margin-bottom:10px">
@@ -4008,7 +4397,7 @@ elif page == "💼 Portfolio":
 
                         with h2:
                             st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:12px;
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;
             padding:20px;height:100%">
   <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#8a9bc2;
               text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">
@@ -4075,7 +4464,7 @@ elif page == "💼 Portfolio":
                                 f'padding:2px 6px;border-radius:3px;margin-left:6px">🇺🇸 {r["Asset"]}</span>'
                             )
                             st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-left:4px solid {col};
+<div style="background:var(--panel);border:1px solid var(--border);border-left:4px solid {col};
             border-radius:8px;padding:14px 18px;margin-bottom:8px">
   <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
     <div style="min-width:60px">
@@ -4114,7 +4503,7 @@ elif page == "💼 Portfolio":
                                         unsafe_allow_html=True)
                             for i, change in enumerate(result.get("top_changes", []), 1):
                                 st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:8px;
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;
             padding:12px 16px;margin-bottom:8px;display:flex;gap:12px;align-items:flex-start">
   <span style="font-family:'IBM Plex Mono',monospace;font-size:18px;font-weight:700;
                color:#16c784;flex-shrink:0">{i}</span>
@@ -4126,7 +4515,7 @@ elif page == "💼 Portfolio":
                                         unsafe_allow_html=True)
                             for me in result.get("missing_exposures", []):
                                 st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:8px;
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;
             padding:12px 16px;margin-bottom:8px">
   <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;
                color:#f0b90b;margin-bottom:4px">+ {me.get('theme','')}</div>
@@ -4431,13 +4820,15 @@ elif page == "⭐ Weekly Picks":
     import datetime as _dt_wp
     _wp_week_num = _dt_wp.date.today().isocalendar()[1]
     st.title("⭐ Weekly Buy Recommendations")
-    _page_about("""**What:** an automatic scanner that surfaces stocks in BUYABLE condition *this week* — not just good companies.
-**How:** 60 stocks scanned (30 anchor + 30 rotating weekly from 223); each scored on 5 pillars — model (fundamentals+technicals+momentum), analyst consensus, options flow, breakout setup, momentum bonus. Entry requires ≥4 of 6 conditions at thresholds set by the market regime (stricter in RISK-OFF). Repeat picks get a recency penalty; max 2 per sector.
+    _page_about("""**What:** an automatic scanner that surfaces up to 15 buyable ideas *this week* — swing setups, quality stocks knocked down to a price their business doesn't justify, and trending theme ETFs.
+**How:** ~80 stocks scanned weekly from a broad universe (curated list + the live S&P 500, not a fixed closed list) plus ~42 theme ETFs. Three paths feed one ranked list: 🔥 Swing (passes 4/6 technical+fundamental entry conditions), 💎 Quality Dip (strong business, price out of favor — Opportunity Lens' "quality on sale" read), 📊 ETF Theme (trend/relative-strength scan, no fundamentals gate). Repeat stock picks get a recency penalty; max 2 stocks per sector; ETFs capped at 5 of the 15 slots.
 **Use:** treat picks as a curated shortlist for deep-dive in Analyze — not as blind buy orders. The regime banner tells you how aggressive the environment allows you to be.""")
     st.caption(
-        f"Week {_wp_week_num} · Scanning 60 / {len(set(WEEKLY_UNIVERSE))} stocks this week "
-        f"(30 anchor + 30 rotating across 17 themes) · "
-        "Recency penalty + sector cap ensure fresh picks every week"
+        f"Week {_wp_week_num} · Scanning ~80 stocks from a "
+        f"{st.session_state.get('wp_output', {}).get('universe_size', '500+')}-stock universe "
+        f"(curated list + live S&P 500) plus ~42 theme ETFs · "
+        "Recency penalty + sector cap ensure fresh picks every week · "
+        "Max 15 picks shown, at most 5 of them ETFs"
     )
 
     if not ANTHROPIC_API_KEY:
@@ -4521,13 +4912,24 @@ elif page == "⭐ Weekly Picks":
 
     s1, s2, s3, s4 = st.columns(4)
     s1.metric("Scanned",    scanned,
-              help="Stocks evaluated this week: 30 anchor names + 30 rotating from the 223-stock universe. Rotation ensures fresh candidates surface every week.")
+              help="Stocks evaluated this week: 30 anchor names + 50 rotating from the full universe (curated list ∪ live S&P 500). Rotation ensures fresh candidates surface every week.")
     s2.metric("Qualified",  len(recs), delta=f"{filtered_out} filtered out",
-              help="Passed at least 4 of 6 entry conditions (fundamental, technical, analysts, MA200, momentum, options flow) at thresholds set by the current market regime — stricter in RISK-OFF.")
+              help="Combines 3 paths, capped at 15 total: 🔥 Swing (≥4/6 entry conditions at regime-set thresholds), "
+                   "💎 Quality Dip (strong business, beaten-down price), 📊 ETF Theme (trend strength, no fundamentals gate).")
     s3.metric("Strong Buy", len(strong_buys),
               help=mod_gloss.tip("weekly_score"))
     s4.metric("Buy",        len(buys),
               help=mod_gloss.tip("conviction"))
+
+    _n_swing = output.get("n_swing", len(recs))
+    _n_dip   = output.get("n_dip", 0)
+    _n_etf   = output.get("n_etf", 0)
+    st.caption(
+        f"This week's list: 🔥 {sum(1 for r in recs if r.get('category')=='SWING')} swing · "
+        f"💎 {sum(1 for r in recs if r.get('category')=='QUALITY_DIP')} quality dip · "
+        f"📊 {sum(1 for r in recs if r.get('category')=='ETF_THEME')} ETF theme "
+        f"(of {_n_swing} swing-qualified, {_n_dip} quality-dip-qualified, {_n_etf} ETF-qualified found this week — capped to 15)"
+    )
 
     if not recs:
         thresh = output.get("thresholds", {})
@@ -4554,7 +4956,7 @@ elif page == "⭐ Weekly Picks":
                 _f  = f"{_nm.get('fundamental',0):.1f}" if _nm.get("fundamental") else "—"
                 _t  = f"{_nm.get('technical',0):.1f}" if _nm.get("technical") else "—"
                 _col.markdown(
-                    f'<div style="background:#1c2333;border:1px solid #2a3348;border-radius:8px;padding:10px;font-size:11px">'
+                    f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:10px;font-size:11px">'
                     f'<div style="color:#e8edf8;font-weight:700;font-size:13px;margin-bottom:6px">{_nm["symbol"]}</div>'
                     f'<div style="color:#8a9bc2">Fund: <span style="color:#e8edf8">{_f}</span></div>'
                     f'<div style="color:#8a9bc2">Tech: <span style="color:#e8edf8">{_t}</span></div>'
@@ -4581,7 +4983,7 @@ elif page == "⭐ Weekly Picks":
                      ("WEAK",   "#ea3a44"))
         return (
             f'<div style="text-align:center;padding:12px 6px 10px;background:#161c2c;'
-            f'border-radius:8px;border:1px solid #2a3348">'
+            f'border-radius:8px;border:1px solid var(--border)">'
             f'<div style="font-size:26px;font-weight:700;color:{color};line-height:1">'
             f'{v:.1f}</div>'
             f'<div style="background:#2a3348;border-radius:3px;height:5px;margin:6px 0 4px">'
@@ -4593,7 +4995,7 @@ elif page == "⭐ Weekly Picks":
     def _met_cell(label, value, ind_label, ind_color, help_txt):
         return (
             f'<div title="{ind_label}: {help_txt}" '
-            f'style="padding:10px 8px;background:#161c2c;border-radius:8px;border:1px solid #2a3348">'
+            f'style="padding:10px 8px;background:#161c2c;border-radius:8px;border:1px solid var(--border)">'
             f'<div style="font-size:9px;color:#556070;text-transform:uppercase;'
             f'letter-spacing:.7px;margin-bottom:5px">{label}</div>'
             f'<div style="font-size:17px;font-weight:600;color:#e8edf8;line-height:1">{value}</div>'
@@ -4601,6 +5003,12 @@ elif page == "⭐ Weekly Picks":
             f'{ind_label}</div>'
             f'</div>'
         )
+
+    _CATEGORY_BADGE = {
+        "SWING":      ("🔥 SWING SETUP",  "#f97316"),
+        "QUALITY_DIP": ("💎 QUALITY DIP", "#4da3ff"),
+        "ETF_THEME":  ("📊 ETF THEME",    "#a78bfa"),
+    }
 
     # ── One card per recommendation ───────────────────────────────────────────
     for rank, r in enumerate(recs, 1):
@@ -4610,6 +5018,59 @@ elif page == "⭐ Weekly Picks":
         conv   = thesis.get("conviction", 0) or 0
         stars  = "★" * conv + "☆" * (5 - conv)
         qflag  = thesis.get("quality_flag", "")
+        cat_lbl, cat_color = _CATEGORY_BADGE.get(r.get("category"), ("", "#8a9bc2"))
+
+        # ── ETF theme cards get a simpler, dedicated layout — they don't
+        # have fundamentals/analyst/options data, so force-fitting them into
+        # the stock card template would just show misleading zeros. ─────────
+        if r.get("category") == "ETF_THEME":
+            ws = r["weekly_score"]
+            st.markdown(
+                f'<div style="border-left:5px solid {cat_color};padding:8px 0 8px 16px;margin-bottom:2px">'
+                f'<span style="color:#556070;font-size:11px">#{rank}&nbsp;&nbsp;</span>'
+                f'<span style="font-size:26px;font-weight:700;color:#e8edf8">{r["symbol"]}</span>'
+                f'&nbsp;&nbsp;<span style="font-size:13px;color:#8a9bc2">{r.get("name","")[:40]}</span>'
+                f'&nbsp;&nbsp;<span style="background:{cat_color}22;color:{cat_color};border:1px solid {cat_color}44;'
+                f'padding:4px 14px;border-radius:6px;font-size:12px;font-weight:700">{cat_lbl}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            _etf_c1, _etf_c2, _etf_c3, _etf_c4 = st.columns(4)
+            _etf_c1.markdown('<div style="font-size:10px;color:#556070;text-transform:uppercase">Strength Score</div>' +
+                             _score_bar(ws, "#a78bfa"), unsafe_allow_html=True)
+            _etf_c2.metric("1M Return", f"{(r.get('r1m') or 0):+.1f}%")
+            _etf_c3.metric("3M Return", f"{(r.get('r3m') or 0):+.1f}%")
+            _etf_c4.metric("vs SPY (1M)", f"{(r.get('rs1m') or 0):+.1f}%")
+            st.markdown(
+                f"📐 Breakout: **{r.get('breakout_setup') or 'No clear setup'}** &nbsp;·&nbsp; "
+                f"📈 {'✅ Above MA200' if r.get('above_200') else '❌ Below MA200'}"
+            )
+            st.write("")
+            if thesis:
+                with st.expander("📋 Theme Thesis — Why · When · Target · Risk", expanded=True):
+                    if thesis.get("headline"):
+                        st.markdown(f'### *{thesis["headline"]}*')
+                    why_items = thesis.get("why_buy") or []
+                    if why_items:
+                        st.markdown("#### ▸ Why")
+                        for w in why_items:
+                            st.markdown(f"- {w}")
+                    t1, t2, t3 = st.columns(3)
+                    with t1:
+                        st.markdown("**⏱ When**"); st.write(thesis.get("when_buy") or "—")
+                    with t2:
+                        st.markdown("**🛑 Stop**"); st.write(thesis.get("stop_loss") or "—")
+                    with t3:
+                        st.markdown("**⚠️ Risk**"); st.write(thesis.get("key_risk") or "—")
+            _, etf_btn_col = st.columns([5, 1])
+            with etf_btn_col:
+                if st.button("Deep Dive →", key=f"wp_etf_{r['symbol']}", use_container_width=True):
+                    st.session_state["symbol"] = r["symbol"]
+                    st.session_state["_az_sym"] = r["symbol"]
+                    st.session_state["page_jump"] = "🔍 Analyze"
+                    st.rerun()
+            st.divider()
+            continue
 
         ws   = r["weekly_score"]
         ms   = r.get("model_score") or 5
@@ -4710,6 +5171,8 @@ elif page == "⭐ Weekly Picks":
             f'&nbsp;&nbsp;<span style="font-size:13px;color:#8a9bc2">{r.get("name","")[:30]}</span>'
             f'&nbsp;&nbsp;<span style="background:{col}22;color:{col};border:1px solid {col}44;'
             f'padding:4px 14px;border-radius:6px;font-size:13px;font-weight:700">{action}</span>'
+            f'&nbsp;&nbsp;<span style="background:{cat_color}22;color:{cat_color};border:1px solid {cat_color}44;'
+            f'padding:4px 14px;border-radius:6px;font-size:12px;font-weight:700">{cat_lbl}</span>'
             f'{_fresh_html}'
             f'</div>'
             f'<div style="padding:0 0 10px 21px;color:#556070;font-size:12px">'
@@ -4720,6 +5183,11 @@ elif page == "⭐ Weekly Picks":
             f'</div>',
             unsafe_allow_html=True,
         )
+        if r.get("category") == "QUALITY_DIP" and r.get("opportunity_guidance"):
+            st.caption(
+                f"💎 Quality-dip read (Opportunity Lens — quality {r.get('quality_score','?')}/10, "
+                f"condition {r.get('condition_score','?')}/10): {r['opportunity_guidance']}"
+            )
 
         # ── SCORES (progress bars) ────────────────────────────────────────────
         sc1, sc2, sc3, sc4, sc5 = st.columns(5)
@@ -4851,6 +5319,32 @@ elif page == "⭐ Weekly Picks":
             with st.expander(f"📦 Sector ETF Holdings — {_wp_etf_sym} ({_wp_sector})", expanded=False):
                 mod_etf.render_etf_holdings(_wp_etf_sym, max_rows=10)
 
+        # ── OPTIONAL NEWS SENTIMENT DEEP-DIVE (Alpha Vantage — manual only,
+        # never runs automatically for the whole list; free tier is 25
+        # symbols/day so it's opt-in per name, same pattern as Analyze) ──────
+        from config import ALPHA_VANTAGE_API_KEY as _wp_av_api_key
+        if _wp_av_api_key:
+            _wp_av_key = f"_av_sent_{r['symbol']}"
+            with st.expander(f"📡 News sentiment for {r['symbol']} (optional — Alpha Vantage NLP)", expanded=False):
+                if _wp_av_key not in st.session_state:
+                    if st.button("Load news sentiment", key=f"wp_av_btn_{r['symbol']}"):
+                        with st.spinner("Scoring recent news..."):
+                            st.session_state[_wp_av_key] = mod_av.news_sentiment(r["symbol"])
+                        st.rerun()
+                else:
+                    _wp_av = st.session_state[_wp_av_key]
+                    if _wp_av.get("error"):
+                        st.caption(f"Unavailable: {_wp_av['error']}")
+                    else:
+                        _wp_av_d = _wp_av["dist"]
+                        st.markdown(
+                            f"**{_wp_av['label']}** ({_wp_av['avg_score']:+.2f}) — "
+                            f"{_wp_av['n_articles']} articles · "
+                            f"{_wp_av_d['bullish']}↑ {_wp_av_d['neutral']}→ {_wp_av_d['bearish']}↓"
+                        )
+                        for _t in _wp_av["top"][:3]:
+                            st.caption(f"{_t['score']:+.2f} — {_t['title'][:90]}")
+
         # ── DEEP DIVE ─────────────────────────────────────────────────────────
         _, btn_col = st.columns([5, 1])
         with btn_col:
@@ -4886,117 +5380,12 @@ elif page == "⭐ Weekly Picks":
     csv_wp = pd.DataFrame(export_rows).to_csv(index=False)
     st.download_button("📥 Export Recommendations CSV", csv_wp,
                        "weekly_recommendations.csv", "text/csv")
-# ─── Page: Alerts ─────────────────────────────────────────────────────────────
-elif page == "🔔 Alerts":
-    st.title("🔔 Price & RSI Alerts")
-    _page_about("""**What:** persistent price/RSI alerts + automatic earnings-date notifications for everything you track.
-**How:** checks run every ~5 minutes while the app is open (price vs threshold; RSI-14 vs threshold). Earnings alerts scan your watchlist + paper holdings against the Finnhub calendar 7 days ahead — each report notifies once.
-**Use:** set alerts at DECISION levels (support, stop, target) — not random numbers. An alert should mean 'when this fires, I already know what I'll do'.""")
-    st.caption("Set alerts that trigger when a stock hits your target price or RSI level. Alerts persist across restarts.")
-
-    # ── Add new alert ─────────────────────────────────────────────────────
-    with st.expander("➕ Add New Alert", expanded=True):
-        a1, a2, a3 = st.columns([2, 2, 3])
-        with a1:
-            al_sym = st.text_input("Symbol",
-                                   value=st.session_state.pop("alert_prefill", ""),
-                                   placeholder="NVDA").upper().strip()
-        with a2:
-            al_type = st.selectbox("Alert Type", list(mod_alerts.ALERT_TYPES.keys()),
-                                   format_func=lambda k: mod_alerts.ALERT_TYPES[k])
-        with a3:
-            al_thresh = st.number_input(
-                "Threshold",
-                min_value=0.0,
-                value=100.0,
-                step=1.0,
-                help="Price in $ for PRICE alerts, RSI value (0–100) for RSI alerts",
-            )
-        al_note = st.text_input("Note (optional)", placeholder="e.g. Support level, oversold entry…")
-        if st.button("Add Alert", type="primary"):
-            if al_sym:
-                mod_alerts.add_alert(al_sym, al_type, al_thresh, al_note)
-                st.success(f"Alert added: {al_sym} — {mod_alerts.ALERT_TYPES[al_type]} {al_thresh}")
-                st.rerun()
-            else:
-                st.error("Please enter a symbol.")
-
-    # ── Active alerts ─────────────────────────────────────────────────────
-    all_alerts = mod_alerts.load_alerts()
-    # EARNINGS_SEEN entries are internal bookkeeping (one-shot earnings
-    # notifications), not user alerts — exclude from both lists
-    all_alerts = [a for a in all_alerts if a.get("type") != "EARNINGS_SEEN"]
-    active     = [a for a in all_alerts if a.get("active")]
-    history    = [a for a in all_alerts if not a.get("active")]
-
-    st.subheader(f"Active Alerts ({len(active)})")
-    if not active:
-        st.info("No active alerts. Add one above.")
-    else:
-        for al in active:
-            lbl = mod_alerts.ALERT_TYPES.get(al["type"], al["type"])
-            c1, c2, c3 = st.columns([3, 4, 1])
-            with c1:
-                st.markdown(f"**{al['symbol']}** — {lbl} **{al['threshold']}**")
-                if al.get("note"):
-                    st.caption(al["note"])
-            with c2:
-                # Show current value
-                try:
-                    if al["type"] in ("PRICE_ABOVE", "PRICE_BELOW"):
-                        info = get_ticker_info(al["symbol"])
-                        cur = info.get("currentPrice") or info.get("regularMarketPrice") or 0
-                        delta = cur - al["threshold"]
-                        col = "#16c784" if (
-                            (al["type"] == "PRICE_ABOVE" and delta > 0) or
-                            (al["type"] == "PRICE_BELOW" and delta < 0)
-                        ) else "#8a9bc2"
-                        st.markdown(
-                            f'<span style="color:{col}">Current: ${cur:.2f} '
-                            f'({delta:+.2f} from target)</span>',
-                            unsafe_allow_html=True,
-                        )
-                    elif al["type"] in ("RSI_ABOVE", "RSI_BELOW"):
-                        rsi = mod_alerts._current_rsi(al["symbol"])
-                        if rsi:
-                            delta = rsi - al["threshold"]
-                            col = "#16c784" if (
-                                (al["type"] == "RSI_ABOVE" and delta > 0) or
-                                (al["type"] == "RSI_BELOW" and delta < 0)
-                            ) else "#8a9bc2"
-                            st.markdown(
-                                f'<span style="color:{col}">RSI: {rsi} '
-                                f'({delta:+.1f} from {al["threshold"]})</span>',
-                                unsafe_allow_html=True,
-                            )
-                except Exception:
-                    pass
-                st.caption(f"Set: {al.get('created_at', '—')}")
-            with c3:
-                if st.button("🗑", key=f"del_{al['id']}", help="Delete alert"):
-                    mod_alerts.delete_alert(al["id"])
-                    st.rerun()
-
-    # ── Triggered history ─────────────────────────────────────────────────
-    if history:
-        with st.expander(f"📋 Triggered History ({len(history)})"):
-            for al in reversed(history):
-                lbl = mod_alerts.ALERT_TYPES.get(al["type"], al["type"])
-                st.markdown(
-                    f"✅ **{al['symbol']}** — {lbl} {al['threshold']} "
-                    f"→ triggered at **{al.get('triggered_val', '?')}** "
-                    f"on {al.get('triggered_at', '—')}"
-                )
-            if st.button("🧹 Clear History"):
-                mod_alerts.clear_history()
-                st.rerun()
-
 
 # ─── Page: Market Health ─────────────────────────────────────────────────────
 elif page == "🏥 Market Health":
     st.title("🏥 Market Health Dashboard")
-    _page_about("""**What:** the macro backdrop in one composite — should you be aggressive or defensive right now?
-**How:** 9 indicators (VIX, yield curve, Fed rate, CPI, unemployment, credit spreads, dollar, gold-vs-trend, S&P trend) each classified green/yellow/red, then blended into a weighted 0-100 composite. Above 70 = risk-on; below 40 = defense.
+    _page_about("""**What:** the macro backdrop in one composite — should you be aggressive or defensive right now, and where is money actually rotating?
+**How:** 11 indicators (VIX, yield curve, 10Y yield, Fed rate, headline + core CPI, unemployment, credit spreads, dollar, gold-vs-trend, S&P trend) each classified green/yellow/red, blended into a weighted 0-100 composite. Above 70 = risk-on; below 40 = defense. A Claude-generated narrative reads the CURRENT combination of readings (not each in isolation) to call out money-flow direction and sector rotation.
 **Use:** this sets position SIZING and aggressiveness, not stock picks. Great stock + hostile macro = smaller size, wider stops.""")
     st.caption("Real-time macro & sentiment indicators to assess market conditions and timing for new investments.")
 
@@ -5022,7 +5411,7 @@ elif page == "🏥 Market Health":
 
     def _gauge_card(title, tip_key, value_s, color, verdict, extra=""):
         return (
-            f'<div style="background:#161b27;border:1px solid #2a3348;'
+            f'<div style="background:var(--panel);border:1px solid var(--border);'
             f'border-left:4px solid {color};border-radius:10px;'
             f'padding:16px 18px;height:100%;cursor:help" '
             f'title="{_html.escape(mod_gloss.tip(tip_key), quote=True)}">'
@@ -5064,8 +5453,9 @@ elif page == "🏥 Market Health":
         if _fred_missing or not data:
             st.info(
                 "⚠️ Some macro indicators require a FRED API key (free at [fred.stlouisfed.org](https://fred.stlouisfed.org)).\n\n"
-                "Affected: Fed Rate, CPI, Unemployment, HY Spread. "
-                "Yield Curve is approximated from yfinance (10Y–5Y spread).\n\n"
+                "Affected: Fed Rate, CPI, Core CPI, Unemployment, HY Spread. "
+                "Yield Curve is approximated from yfinance (10Y–5Y spread); "
+                "10Y Yield falls back to yfinance ^TNX directly.\n\n"
                 "Add `FRED_API_KEY=your_key` to your `.env` file for full data."
             )
 
@@ -5077,11 +5467,11 @@ elif page == "🏥 Market Health":
         score = result["score"]
         arc_pct = score / 100
         st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:12px;
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;
             padding:24px;text-align:center">
   <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;
               text-transform:uppercase;letter-spacing:1.2px;color:#8a9bc2;
-              margin-bottom:12px">MARKET HEALTH SCORE</div>
+              margin-bottom:12px;cursor:help" title="{_html.escape(mod_gloss.tip('composite_health'), quote=True)}">MARKET HEALTH SCORE ⓘ</div>
   <div style="font-family:'IBM Plex Mono',monospace;font-size:72px;font-weight:700;
               color:{result['color']};line-height:1">{score:.0f}</div>
   <div style="color:#556070;font-size:12px;margin-bottom:12px">/ 100</div>
@@ -5093,7 +5483,7 @@ elif page == "🏥 Market Health":
 
     with c_rec:
         st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:12px;
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;
             padding:24px;height:100%">
   <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;
               text-transform:uppercase;letter-spacing:1.2px;color:#8a9bc2;
@@ -5102,10 +5492,56 @@ elif page == "🏥 Market Health":
     {result['recommendation']}
   </div>
   <div style="font-size:11px;color:#556070">
-    Score is a weighted composite of 9 macro & sentiment indicators.
+    Score is a weighted composite of 9 of the 11 macro & sentiment indicators below
+    (Core CPI and 10Y Yield feed the narrative, not the composite, to avoid
+    double-weighting inflation/rates against CPI and the yield curve).
     Not financial advice — always do your own research.
   </div>
 </div>""", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── 🌊 Dynamic money-flow narrative ────────────────────────────────────────
+    # The invest_signal strings on each indicator card below are always true
+    # in isolation; this reads how TODAY's specific combination interacts —
+    # e.g. rising yields + strong dollar + sticky core CPI tells a different
+    # story than rising yields + weak dollar + falling core CPI, even though
+    # both have "rising yields." Same pattern as the per-stock macro
+    # narrative in Analyze (modules/macro_geo.py), generalized market-wide.
+    st.markdown('<div class="panel-head">🌊 WHERE IS MONEY FLOWING — DYNAMIC READ</div>',
+               unsafe_allow_html=True)
+    _mh_snapshot = mod_mhealth._narrative_snapshot(data, result)
+    _mh_narr = mod_mhealth.macro_narrative(_mh_snapshot)
+    if _mh_narr.get("error"):
+        st.info(_mh_narr["error"])
+    else:
+        st.markdown(
+            f'<div style="background:var(--panel);border:1px solid var(--border);'
+            f'border-left:4px solid {result["color"]};border-radius:10px;'
+            f'padding:18px 22px;margin-bottom:14px">'
+            f'<div style="font-size:15px;font-weight:700;color:#e8edf8;margin-bottom:10px">'
+            f'{_html.escape(_mh_narr.get("headline",""))}</div>'
+            f'<div style="font-size:13px;color:#cdd6f4;line-height:1.7">'
+            f'{_html.escape(_mh_narr.get("narrative",""))}</div>'
+            f'</div>', unsafe_allow_html=True,
+        )
+        _mhc1, _mhc2 = st.columns(2)
+        with _mhc1:
+            st.markdown("**📥 Money flowing INTO**")
+            for _x in _mh_narr.get("money_flowing_into", []):
+                st.markdown(f"- {_x}")
+            st.markdown("**🏆 Sectors favored**")
+            for _x in _mh_narr.get("sectors_favored", []):
+                st.markdown(f"- {_x}")
+        with _mhc2:
+            st.markdown("**📤 Money flowing OUT OF**")
+            for _x in _mh_narr.get("money_flowing_out_of", []):
+                st.markdown(f"- {_x}")
+            st.markdown("**⚠️ Sectors at risk**")
+            for _x in _mh_narr.get("sectors_at_risk", []):
+                st.markdown(f"- {_x}")
+        if _mh_narr.get("watch_for"):
+            st.caption(f"👁 **Watch for:** {_mh_narr['watch_for']}")
 
     st.markdown("---")
 
@@ -5124,7 +5560,7 @@ elif page == "🏥 Market Health":
             val_str = sig.get("display", "N/A")
 
             col.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-left:3px solid {col_hex};
+<div style="background:var(--panel);border:1px solid var(--border);border-left:3px solid {col_hex};
             border-radius:8px;padding:16px;margin-bottom:10px;height:100%">
   <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;
               text-transform:uppercase;letter-spacing:.8px;color:#8a9bc2;
@@ -5184,7 +5620,7 @@ elif page == "🏥 Market Health":
 elif page == "🔄 Sector Rotation":
     st.title("🔄 Sector Rotation Monitor")
     st.caption(
-        "11 SPDR broad sectors + 45 thematic sub-sectors — ranked by 1M Relative Strength vs SPY. "
+        "11 SPDR broad sectors + 48 thematic sub-sectors — ranked by 1M Relative Strength vs SPY. "
         "↑ accelerating · → stable · ↓ decelerating momentum."
     )
     with st.expander("ⓘ How to read this page", expanded=False):
@@ -5192,6 +5628,11 @@ elif page == "🔄 Sector Rotation":
         st.markdown(f"- **Momentum direction (↑→↓):** {mod_gloss.tip('momentum_dir')}")
         st.markdown(f"- **Grade (A-F):** {mod_gloss.tip('grade')}")
         st.markdown(f"- **Why rotation matters:** {mod_gloss.tip('sector_rotation')}")
+        st.markdown(
+            "- **🆕 Early signal:** the latest **week's** RS breaking away from the "
+            "1-month trend — a heads-up days before it's big enough to flip the "
+            "↑→↓ momentum arrow, which needs a full month of drift to move."
+        )
 
     if st.button("🔄 Load Sector Data", type="primary") or "sector_rot" not in st.session_state:
         with st.spinner("Fetching sector ETF data…"):
@@ -5201,6 +5642,53 @@ elif page == "🔄 Sector Rotation":
     if not rot:
         st.info("No sector data available. Click Load Sector Data.")
         st.stop()
+
+    # ── Earliest-possible change detection ────────────────────────────────────
+    _early_up   = sorted([r for r in rot if r.get("early_signal") == "up"],
+                         key=lambda x: x["rs1w"] - x["rs1m"], reverse=True)
+    _early_down = sorted([r for r in rot if r.get("early_signal") == "down"],
+                         key=lambda x: x["rs1w"] - x["rs1m"])
+    _movers_up   = sorted([r for r in rot if (r.get("rs1m_delta") or 0) > 0],
+                          key=lambda x: x["rs1m_delta"], reverse=True)[:5]
+    _movers_down = sorted([r for r in rot if (r.get("rs1m_delta") or 0) < 0],
+                          key=lambda x: x["rs1m_delta"])[:5]
+
+    if _early_up or _early_down:
+        st.markdown('<div class="panel-head">🆕 EARLY ROTATION SIGNALS — THIS WEEK BREAKING FROM TREND</div>',
+                    unsafe_allow_html=True)
+        ec1, ec2 = st.columns(2)
+        with ec1:
+            st.markdown("**🆕 Turning up**")
+            if _early_up:
+                for r in _early_up[:6]:
+                    st.markdown(f"- **{r['label']}** ({r['etf']}) — 1W RS {r['rs1w']:+.1f}% vs 1M RS {r['rs1m']:+.1f}%")
+            else:
+                st.caption("None right now.")
+        with ec2:
+            st.markdown("**⚠ Turning down**")
+            if _early_down:
+                for r in _early_down[:6]:
+                    st.markdown(f"- **{r['label']}** ({r['etf']}) — 1W RS {r['rs1w']:+.1f}% vs 1M RS {r['rs1m']:+.1f}%")
+            else:
+                st.caption("None right now.")
+        st.divider()
+
+    if _movers_up or _movers_down:
+        st.markdown('<div class="panel-head">📊 MOVED SINCE LAST CHECK</div>', unsafe_allow_html=True)
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            st.markdown("**📈 RS improved most**")
+            for r in _movers_up:
+                st.markdown(f"- **{r['label']}** ({r['etf']}) — RS 1M {r['rs1m_delta']:+.1f}pt")
+            if not _movers_up:
+                st.caption("Nothing improved since last check.")
+        with mc2:
+            st.markdown("**📉 RS worsened most**")
+            for r in _movers_down:
+                st.markdown(f"- **{r['label']}** ({r['etf']}) — RS 1M {r['rs1m_delta']:+.1f}pt")
+            if not _movers_down:
+                st.caption("Nothing worsened since last check.")
+        st.divider()
 
     # ── Summary bar chart: RS vs SPY — grouped by category for readability ────
     st.markdown('<div class="panel-head">RELATIVE STRENGTH VS SPY — 1 MONTH</div>',
@@ -5247,17 +5735,37 @@ elif page == "🔄 Sector Rotation":
     st.markdown('<div class="panel-head">ROTATION QUADRANT — 1M RETURN vs 3M RETURN</div>',
                 unsafe_allow_html=True)
     st.caption("Top-right = Leading (strong short + long momentum)  ·  "
-               "Top-left = Improving  ·  Bottom-right = Weakening  ·  Bottom-left = Lagging")
+               "Top-left = Improving  ·  Bottom-right = Weakening  ·  Bottom-left = Lagging  ·  "
+               f"filtered to: **{_cat_sel}**")
+    st.caption("🎨 Color = RS vs SPY 1M (red → yellow → green, same scale as the bar chart above)  ·  "
+               "⬤ Size = overall strength score (MA position + momentum) — bigger = higher conviction.")
+
+    def _rs_gradient_color(rs1m: float, cap: float = 15.0) -> str:
+        """Red→yellow→green diverging scale centered at 0, same red/green
+        hexes as the RS bar chart above — so both charts speak one color
+        language instead of the quadrant using an unrelated grade bucket."""
+        t = max(-1.0, min(1.0, rs1m / cap))
+        if t >= 0:
+            a, b = (240, 185, 11), (22, 199, 132)
+        else:
+            a, b = (240, 185, 11), (234, 58, 68)
+            t = -t
+        rgb = tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
+        return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
+
+    def _score_bubble_size(score: float) -> float:
+        return 10 + max(0.0, min(9.0, score - 1.0)) / 9.0 * 26
 
     fig_quad = go.Figure()
-    for r in rot:
+    for r in _rot_view:
         fig_quad.add_trace(go.Scatter(
             x=[r["r3m"]], y=[r["r1m"]],
             mode="markers+text",
             text=[f"{r['etf']} {r['momentum_dir']}"],
             textposition="top center",
             textfont=dict(size=10, color="#e8edf8"),
-            marker=dict(size=14, color=r["grade_color"],
+            marker=dict(size=_score_bubble_size(r["score"]),
+                        color=_rs_gradient_color(r["rs1m"]),
                         line=dict(width=1, color="#2a3348")),
             hovertemplate=(
                 f"<b>{r['label']} ({r['etf']})</b><br>"
@@ -5325,6 +5833,19 @@ elif page == "🔄 Sector Rotation":
     )
 
     st.divider()
+
+    # ── Ecosystem drill-down — full holdings of every ETF in the picked
+    # category, so a theme like "AI & Compute" shows every underlying name
+    # (chips, cloud, data-center REITs, grid…) instead of one ETF at a time.
+    if _cat_sel not in ("🔥 Top 15", "All"):
+        st.markdown(f'<div class="panel-head">🔬 {_cat_sel.upper()} ECOSYSTEM — TOP HOLDINGS</div>',
+                    unsafe_allow_html=True)
+        st.caption("Every ETF in this theme, expanded — the underlying stocks are the actual ecosystem.")
+        for r in _rot_view:
+            with st.expander(f"{r['label']} — {r['etf']}  ({r['grade']})", expanded=False):
+                mod_etf.render_etf_holdings(r["etf"], max_rows=10)
+        st.divider()
+
     st.markdown('<div class="panel-head">ETF HOLDINGS EXPLORER</div>', unsafe_allow_html=True)
     _etf_options = sorted(set(r["etf"] for r in rot))
     _sel_etf = st.selectbox(
@@ -5582,7 +6103,7 @@ elif page == "📰 News Feed":
         )
 
         st.markdown(
-            f'<div style="background:#1c2333;border:1px solid #2a3348;border-left:3px solid {sc};'
+            f'<div style="background:var(--panel);border:1px solid var(--border);border-left:3px solid {sc};'
             f'border-radius:8px;padding:14px 16px;margin-bottom:8px">'
             f'<div style="display:flex;justify-content:space-between;align-items:center;'
             f'margin-bottom:6px">'
@@ -5678,7 +6199,7 @@ elif page == "🔎 AI Screener":
         risk_color = {"Conservative":"#16c784","Moderate":"#f0b90b","Aggressive":"#ea3a44"}.get(
             port.get("risk_level",""), "#8a9bc2")
         st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:12px;padding:20px;margin:12px 0">
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;margin:12px 0">
   <div style="font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:700;
               color:#e8edf8;margin-bottom:6px">{port.get('theme','Portfolio')}</div>
   <div style="font-size:13px;color:#b0bec5;line-height:1.6;margin-bottom:12px">
@@ -5735,7 +6256,7 @@ elif page == "🔎 AI Screener":
                 r3_s = f"{ld['r3m']*100:+.1f}%" if ld.get("r3m") else "N/A"
                 px_s = f"${ld['price']:.2f}" if ld.get("price") else "N/A"
                 st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:8px;
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;
             padding:12px 16px;margin-bottom:8px;border-left:3px solid {rc}">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
     <div>
@@ -5816,7 +6337,7 @@ elif page == "🔎 AI Screener":
             st.stop()
 
         st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #16c784;border-radius:8px;padding:14px 16px;margin:12px 0">
+<div style="background:var(--panel);border:1px solid #16c784;border-radius:10px;padding:14px 16px;margin:12px 0">
   <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#16c784;
               text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">SCREENING FOR</div>
   <div style="font-size:13px;color:#e8edf8">{parsed.get('explanation','')}</div>
@@ -5891,7 +6412,7 @@ elif page == "🔎 AI Screener":
             mom_v  = sc.get("momentum", 0) or 0
 
             st.markdown(f"""
-<div style="background:#1c2333;border:1px solid #2a3348;border-radius:10px;
+<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;
             border-left:4px solid {col};padding:16px 20px;margin-bottom:10px">
 
   <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">
@@ -6097,7 +6618,7 @@ elif page == "🎯 Tracker":
     _th_tp = "text-align:left;font-size:10px;color:#556070;padding:4px 10px;font-family:'IBM Plex Mono',monospace"
     _tr_tp = "text-align:right;font-size:10px;color:#556070;padding:4px 10px;font-family:'IBM Plex Mono',monospace"
     st.markdown(
-        f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;'
+        f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;'
         f'padding:12px 16px;overflow-x:auto">'
         f'<table style="width:100%;border-collapse:collapse">'
         f'<thead><tr>'
@@ -6176,7 +6697,7 @@ elif page == "🎯 Tracker":
             _urg_c = {"NONE": "#16c784", "LOW": "#a3e635",
                       "MEDIUM": "#f0b90b", "HIGH": "#ea3a44"}.get(_urg, "#556070")
             st.markdown(
-                f'<div style="background:#161b27;border-left:4px solid {_urg_c};'
+                f'<div style="background:var(--panel);border-left:4px solid {_urg_c};'
                 f'border-radius:8px;padding:14px 18px;margin:8px 0">'
                 f'<span style="color:{_urg_c};font-weight:700;font-size:12px">'
                 f'URGENCY: {_etp(_urg)}</span><br>'
@@ -6267,7 +6788,7 @@ elif page == "🎯 Tracker":
             _th_rp = "text-align:left;font-size:10px;color:#556070;padding:4px 10px;font-family:'IBM Plex Mono',monospace"
             _tr_rp = "text-align:right;font-size:10px;color:#556070;padding:4px 10px;font-family:'IBM Plex Mono',monospace"
             st.markdown(
-                f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;'
+                f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;'
                 f'padding:12px 16px;overflow-x:auto">'
                 f'<table style="width:100%;border-collapse:collapse"><thead><tr>'
                 f'<th style="{_th_rp}">SYMBOL</th>'
@@ -6300,7 +6821,7 @@ elif page == "🎯 Tracker":
                 _worst = _sc.get("worst") or {}
                 _best  = _sc.get("best") or {}
                 st.markdown(
-                    f'<div style="background:#161b27;border-left:3px solid {_sc_c};'
+                    f'<div style="background:var(--panel);border-left:3px solid {_sc_c};'
                     f'border-radius:6px;padding:10px 16px;margin-bottom:8px">'
                     f'<div style="display:flex;justify-content:space-between">'
                     f'<b style="color:#e8edf8">{_etp(_sc_name)}</b>'
@@ -6444,7 +6965,7 @@ elif page == "📊 Backtester":
                 _tip_attr = f' title="{_html.escape(tip, quote=True)}"' if tip else ""
                 _cursor = "cursor:help;" if tip else ""
                 return (
-                    f'<div style="background:#1a2035;border:1px solid #2a3348;border-radius:8px;'
+                    f'<div style="background:#1a2035;border:1px solid var(--border);border-radius:8px;'
                     f'padding:12px 16px;text-align:center;{_cursor}"{_tip_attr}>'
                     f'<div style="font-size:10px;font-family:\'IBM Plex Mono\',monospace;'
                     f'color:#556070;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">{label}{" ⓘ" if tip else ""}</div>'
@@ -6559,7 +7080,7 @@ elif page == "📊 Backtester":
                     )
 
                 st.markdown(
-                    f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;'
+                    f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;'
                     f'padding:12px 16px;overflow-x:auto">'
                     f'<table style="width:100%;border-collapse:collapse">'
                     f'<thead><tr>'
@@ -6841,7 +7362,7 @@ elif page == "📝 Paper Portfolio":
         _th_style = "text-align:left;font-size:10px;color:#556070;padding:4px 12px;font-family:'IBM Plex Mono',monospace"
         _thr_style = "text-align:right;font-size:10px;color:#556070;padding:4px 12px;font-family:'IBM Plex Mono',monospace"
         st.markdown(
-            f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;padding:12px 16px;overflow-x:auto">'
+            f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 16px;overflow-x:auto">'
             f'<table style="width:100%;border-collapse:collapse">'
             f'<thead><tr>'
             f'<th style="{_th_style}">SYMBOL</th>'
@@ -6883,7 +7404,7 @@ elif page == "📝 Paper Portfolio":
             _grade_c  = {"A": "#16c784", "B": "#a3e635", "C": "#f0b90b",
                           "D": "#f97316", "F": "#ea3a44"}.get(_grade, "#556070")
             st.markdown(
-                f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:12px;padding:20px 24px;margin:12px 0">'
+                f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px 24px;margin:12px 0">'
                 f'<div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">'
                 f'<span style="font-size:36px;font-weight:900;color:{_grade_c}">{_grade}</span>'
                 f'<div style="font-size:14px;color:#cdd6f4;line-height:1.5">{_e(_review.get("overall_assessment",""))}</div>'
@@ -6945,7 +7466,7 @@ elif page == "📝 Paper Portfolio":
                     _jact = _jent.get("action", "")
                     _badge_c = "#16c784" if _jact == "BUY" else "#ea3a44"
                     st.markdown(
-                        f'<div style="background:#161b27;border-left:3px solid {_badge_c};'
+                        f'<div style="background:var(--panel);border-left:3px solid {_badge_c};'
                         f'border-radius:6px;padding:10px 16px;margin-bottom:8px">'
                         f'<div style="font-size:11px;color:#556070;margin-bottom:4px">'
                         f'{_e(_jdate)} · '
@@ -6960,7 +7481,7 @@ elif page == "📝 Paper Portfolio":
                     _jg_c   = {"A": "#16c784", "B": "#a3e635", "C": "#f0b90b",
                                 "D": "#f97316", "F": "#ea3a44"}.get(_jgrade, "#556070")
                     st.markdown(
-                        f'<div style="background:#161b27;border-left:3px solid {_jg_c};'
+                        f'<div style="background:var(--panel);border-left:3px solid {_jg_c};'
                         f'border-radius:6px;padding:10px 16px;margin-bottom:8px">'
                         f'<div style="font-size:11px;color:#556070;margin-bottom:4px">'
                         f'{_e(_jdate)} · Full Review · Grade: '
@@ -6971,7 +7492,7 @@ elif page == "📝 Paper Portfolio":
                     )
                 elif _jtype == "dividend":
                     st.markdown(
-                        f'<div style="background:#161b27;border-left:3px solid #f0b90b;'
+                        f'<div style="background:var(--panel);border-left:3px solid #f0b90b;'
                         f'border-radius:6px;padding:10px 16px;margin-bottom:8px">'
                         f'<div style="font-size:11px;color:#556070;margin-bottom:4px">'
                         f'{_e(_jdate)} · 💰 Dividend · {_e(_jent.get("symbol",""))}</div>'
@@ -7026,7 +7547,7 @@ elif page == "📝 Paper Portfolio":
         if _lessons_entries:
             for _le in reversed(_lessons_entries):
                 st.markdown(
-                    f'<div style="background:#161b27;border:1px solid #2a3348;'
+                    f'<div style="background:var(--panel);border:1px solid var(--border);'
                     f'border-radius:8px;padding:12px 16px;margin-bottom:8px">'
                     f'<div style="font-size:11px;color:#556070;margin-bottom:4px">{_e(_le.get("date",""))}</div>'
                     f'<div style="font-size:13px;color:#cdd6f4">{_e(_le.get("text",""))}</div>'
@@ -7067,7 +7588,7 @@ elif page == "📝 Paper Portfolio":
             _th = "text-align:left;font-size:10px;color:#556070;padding:4px 12px;font-family:'IBM Plex Mono',monospace"
             _tr = "text-align:right;font-size:10px;color:#556070;padding:4px 12px;font-family:'IBM Plex Mono',monospace"
             st.markdown(
-                f'<div style="background:#161b27;border:1px solid #2a3348;border-radius:8px;padding:12px 16px;overflow-x:auto">'
+                f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 16px;overflow-x:auto">'
                 f'<table style="width:100%;border-collapse:collapse">'
                 f'<thead><tr>'
                 f'<th style="{_th}">SYMBOL</th>'
@@ -7133,3 +7654,551 @@ elif page == "📝 Paper Portfolio":
             )
         else:
             st.info("Add trades to multiple portfolios to enable comparison.")
+
+
+# ─── Page: Alpha Lab ────────────────────────────────────────────────────────────
+elif page == "🧠 Alpha Lab":
+    st.title("🧠 Alpha Lab")
+    _page_about("""**What:** the consensus of every mechanical model in Fund Models, scanned across a universe and ranked — plus every framework/risk tool/quant model RN SB's own notes name that wasn't in the app yet (guru screens, a trading-psychology bias check, options pricing, portfolio optimization), and an honest look at whether any of this actually produces alpha.
+**How:** the Consensus Scanner runs `fund_models.combined_verdict()` (17 guru checklists, equal-weighted) across a ticker list. Validation splits the honest cases (price-only technical signals, walk-forward backtested without look-ahead bias) from the live-evidence cases (fundamentals-based scores, tracked forward via score history).
+**Use:** scan for consensus leaders before deep-diving in Analyze; run the bias check before you pull the trigger; price options against real market chains; build an efficient frontier for a basket; use Validation to see whether the scoring actually beats the index out of sample.""")
+
+    _tab_scan, _tab_new, _tab_psych, _tab_opt, _tab_popt, _tab_val, _tab_src = st.tabs(
+        ["📊 Consensus Scanner", "🧩 New Frameworks", "🧭 Trading Psychology",
+         "📐 Options Lab", "🌐 Portfolio Optimizer", "🔬 Validation", "📚 Sources & Principles"]
+    )
+
+    # ── Tab 1: Consensus Scanner ─────────────────────────────────────────────
+    with _tab_scan:
+        st.subheader("Consensus Scanner — rank a universe by the combined guru read")
+        _al_wl = _load_json(Path(__file__).parent / ".watchlist.json", default={}).get("symbols", "")
+        _al_default = _al_wl.strip() or ", ".join(WEEKLY_UNIVERSE[:20])
+        _al_universe_input = st.text_area(
+            "Tickers to scan (comma-separated)", value=_al_default, height=70,
+            help="Defaults to your Watchlist if set, otherwise the first 20 Weekly Picks universe tickers.",
+        )
+        _al_syms_raw = [s.strip().upper() for s in _al_universe_input.split(",") if s.strip()]
+        _al_syms = list(dict.fromkeys(_al_syms_raw))[:40]
+        if len(set(_al_syms_raw)) > 40:
+            st.caption("Capped at 40 tickers per scan to keep it fast.")
+
+        if st.button("🔍 Scan Consensus", type="primary", key="_al_scan_btn"):
+            _al_rows = []
+            _al_prog = st.progress(0)
+            for _ai, _asym in enumerate(_al_syms):
+                _al_prog.progress((_ai + 1) / len(_al_syms), text=f"Scoring {_asym}…")
+                try:
+                    _al_fm = mod_fm.analyze_stock(_asym)
+                    if _al_fm.get("error"):
+                        continue
+                    _al_cv = mod_fm.combined_verdict(_al_fm)
+                    if _al_cv["score"] is None:
+                        continue
+                    _al_rows.append({
+                        "Ticker": _asym, "Consensus": _al_cv["score"], "Read": _al_cv["label"],
+                        "Bullish": _al_cv["n_bullish"], "Neutral": _al_cv["n_neutral"],
+                        "Bearish": _al_cv["n_bearish"], "Models": _al_cv["n_total"],
+                    })
+                except Exception:
+                    continue
+            _al_prog.empty()
+            st.session_state["_al_scan_df"] = pd.DataFrame(_al_rows)
+
+        if "_al_scan_df" in st.session_state and not st.session_state["_al_scan_df"].empty:
+            _al_df = st.session_state["_al_scan_df"].sort_values("Consensus", ascending=False)
+            st.dataframe(_al_df, use_container_width=True, hide_index=True)
+            st.caption("Open a ticker in Analyze → Fund Models for the full per-model breakdown.")
+
+    # ── Tab 2: New Frameworks ─────────────────────────────────────────────────
+    with _tab_new:
+        st.subheader("New Frameworks — models RN SB names that weren't in the app yet")
+        _al_sym2 = st.text_input("Ticker", value="AAPL", key="_al_sym2").strip().upper()
+
+        if _al_sym2:
+            _al_fm2 = mod_fm.analyze_stock(_al_sym2)
+            if _al_fm2.get("error"):
+                st.warning(_al_fm2["error"])
+            else:
+                _al_c1, _al_c2 = st.columns(2)
+                with _al_c1:
+                    st.markdown("#### O'Shaughnessy Cornerstone Growth",
+                               help=mod_gloss.tip("oshaughnessy_method"))
+                    _osh = _al_fm2["oshaughnessy"]
+                    for _lbl, _ok, _det in _osh["checks"]:
+                        st.markdown(f"{'✅' if _ok else '❌'} {_lbl} — *{_det}*")
+                    st.caption(f"{_osh['passed']}/{_osh['total']} — {_osh['verdict']}")
+                with _al_c2:
+                    st.markdown("#### Kirkpatrick Relative Strength",
+                               help=mod_gloss.tip("kirkpatrick_method"))
+                    _kp = _al_fm2["kirkpatrick"]
+                    if _kp.get("score") is not None:
+                        st.metric("RS Score", f"{_kp['score']}/10")
+                        st.caption(f"3M: {_kp['r3m']:+.1f}pp · 6M: {_kp['r6m']:+.1f}pp · "
+                                  f"12M: {_kp['r12m']:+.1f}pp vs SPY")
+                    st.caption(_kp["verdict"])
+
+                st.markdown("---")
+                st.markdown("#### Risk of Ruin", help=mod_gloss.tip("risk_of_ruin_method"))
+                _ror_c1, _ror_c2, _ror_c3, _ror_c4 = st.columns(4)
+                with _ror_c1:
+                    _ror_wr = st.slider("Win rate", 0.10, 0.90, 0.45, 0.05, key="_al_ror_wr")
+                with _ror_c2:
+                    _ror_win = st.number_input("Avg win %", value=8.0, step=0.5, key="_al_ror_win")
+                with _ror_c3:
+                    _ror_loss = st.number_input("Avg loss %", value=4.0, step=0.5, key="_al_ror_loss")
+                with _ror_c4:
+                    _ror_risk = st.slider("Risk per trade %", 0.25, 5.0, 1.0, 0.25, key="_al_ror_risk")
+                _ror = mod_rt.risk_of_ruin(_ror_wr, _ror_win, _ror_loss, _ror_risk)
+                if _ror.get("error"):
+                    st.info(_ror["error"])
+                else:
+                    st.markdown(
+                        f"Risk of Ruin: **{_ror['payoff_ror_pct']}%** "
+                        f"(even-money formula for comparison: {_ror['classic_ror_pct']}%) · "
+                        f"Expectancy: **{_ror['expectancy_r']}R**"
+                    )
+                    st.caption(_ror["verdict"])
+
+                st.markdown("---")
+                st.markdown("#### Murphy's 20-Point Money Management Checklist",
+                           help=mod_gloss.tip("murphy_method"))
+                _murphy_answers = {}
+                _mc1, _mc2 = st.columns(2)
+                for _mi, _mitem in enumerate(mod_rt.MURPHY_CHECKLIST):
+                    with (_mc1 if _mi % 2 == 0 else _mc2):
+                        _murphy_answers[_mi] = st.checkbox(_mitem, key=f"_al_murphy_{_mi}")
+                _murphy_res = mod_rt.murphy_checklist(_murphy_answers)
+                if _murphy_res["total"] > 0:
+                    st.markdown(f"**{_murphy_res['passed']}/{_murphy_res['total']} "
+                               f"({_murphy_res['pct']:.0f}%)** — {_murphy_res['verdict']}")
+
+    # ── Tab 3: Trading Psychology ─────────────────────────────────────────────
+    with _tab_psych:
+        st.subheader("Trading Psychology — a bias self-check, not a model")
+        st.caption("Distilled from RN SB's behavioral-finance notes into a Murphy-style "
+                  "yes/no checklist. Every 'no' flags a specific bias pattern — answer it "
+                  "honestly before you place the trade, not after.", help=mod_gloss.tip("trading_psychology_method"))
+
+        _psych_answers = {}
+        _pc1, _pc2 = st.columns(2)
+        for _pi, _pitem in enumerate(mod_psych.BIAS_CHECKLIST):
+            with (_pc1 if _pi % 2 == 0 else _pc2):
+                _psych_answers[_pitem["key"]] = st.checkbox(
+                    _pitem["q"], key=f"_al_psych_{_pitem['key']}", help=_pitem["bias"])
+
+        _psych_res = mod_psych.bias_checklist(_psych_answers)
+        if _psych_res["total"] > 0:
+            st.markdown(f"**{_psych_res['passed']}/{_psych_res['total']} "
+                       f"({_psych_res['pct']:.0f}%)** — {_psych_res['verdict']}")
+            if _psych_res["flags"]:
+                st.warning("Active flags: " + "; ".join(_psych_res["flags"]))
+
+    # ── Tab 4: Options Lab ────────────────────────────────────────────────────
+    with _tab_opt:
+        st.subheader("Options Lab — pricing models checked against real market chains")
+        st.caption("Pulls the actual option chain (yfinance) so theoretical prices are "
+                  "compared to what the market is really quoting — not synthetic inputs.")
+
+        _opt_sym = st.text_input("Ticker", value="AAPL", key="_al_opt_sym").strip().upper()
+        _opt_expiries = mod_opt.get_expiries(_opt_sym) if _opt_sym else []
+
+        if not _opt_expiries:
+            st.info("No option chain found for this ticker (or it has none listed).")
+        else:
+            _oc1, _oc2 = st.columns(2)
+            with _oc1:
+                _opt_expiry = st.selectbox("Expiry", _opt_expiries, key="_al_opt_expiry")
+            with _oc2:
+                _opt_kind = st.radio("Type", ["call", "put"], horizontal=True, key="_al_opt_kind")
+
+            _opt_info = get_ticker_info(_opt_sym)
+            _opt_S = _opt_info.get("currentPrice") or _opt_info.get("regularMarketPrice")
+            _opt_chain = mod_opt.get_chain(_opt_sym, _opt_expiry)
+
+            if _opt_chain.get("error") or not _opt_S:
+                st.warning(_opt_chain.get("error") or "No current price available.")
+            else:
+                _opt_df = _opt_chain["calls"] if _opt_kind == "call" else _opt_chain["puts"]
+                if _opt_df is None or _opt_df.empty:
+                    st.info("No contracts in this chain.")
+                else:
+                    _strikes = _opt_df["strike"].tolist()
+                    _atm_idx = int(np.argmin([abs(k - _opt_S) for k in _strikes]))
+                    _opt_K = st.selectbox("Strike", _strikes, index=_atm_idx, key="_al_opt_strike")
+
+                    _row = _opt_df[_opt_df["strike"] == _opt_K].iloc[0]
+                    _mkt_price = float(_row.get("lastPrice") or 0)
+                    _mkt_iv = float(_row.get("impliedVolatility") or 0)
+
+                    from datetime import date as _dt_date
+                    _days_to_exp = (pd.Timestamp(_opt_expiry).date() - _dt_date.today()).days
+                    _opt_T = max(_days_to_exp, 1) / 365
+
+                    _r_c1, _r_c2 = st.columns(2)
+                    with _r_c1:
+                        _opt_r = st.slider("Risk-free rate %", 0.0, 8.0, mod_opt.RISK_FREE_RATE * 100, 0.25,
+                                          key="_al_opt_r") / 100
+                    with _r_c2:
+                        _hist_vol = mod_opt.historical_vol(_opt_sym)
+                        st.caption(f"Realized vol (60d, annualized): "
+                                  f"{_hist_vol*100:.1f}%" if _hist_vol else "Realized vol unavailable")
+
+                    st.markdown(f"**Market:** last price ${_mkt_price:.2f} · "
+                               f"yfinance implied vol {_mkt_iv*100:.1f}% · "
+                               f"{_days_to_exp}d to expiry")
+
+                    _bsm_at_iv = mod_opt.bsm_price(_opt_S, _opt_K, _opt_T, _opt_r, _mkt_iv, _opt_kind) if _mkt_iv else None
+                    _bsm_at_hist = mod_opt.bsm_price(_opt_S, _opt_K, _opt_T, _opt_r, _hist_vol, _opt_kind) if _hist_vol else None
+                    _binom_euro = mod_opt.binomial_price(_opt_S, _opt_K, _opt_T, _opt_r, _mkt_iv or _hist_vol or 0.3,
+                                                         200, _opt_kind, american=False)
+                    _binom_amer = mod_opt.binomial_price(_opt_S, _opt_K, _opt_T, _opt_r, _mkt_iv or _hist_vol or 0.3,
+                                                         200, _opt_kind, american=True)
+                    _mc = mod_opt.monte_carlo_price(_opt_S, _opt_K, _opt_T, _opt_r, _mkt_iv or _hist_vol or 0.3, _opt_kind)
+                    _solved_iv = mod_opt.implied_vol(_mkt_price, _opt_S, _opt_K, _opt_T, _opt_r, _opt_kind)
+
+                    _m1, _m2, _m3, _m4 = st.columns(4)
+                    with _m1:
+                        st.metric("BSM @ market IV", f"${_bsm_at_iv:.2f}" if _bsm_at_iv else "—",
+                                 help=mod_gloss.tip("bsm_method"))
+                    with _m2:
+                        st.metric("BSM @ realized vol", f"${_bsm_at_hist:.2f}" if _bsm_at_hist else "—",
+                                 help="If this differs a lot from market price, options are pricing "
+                                      "meaningfully more/less future turbulence than recent history showed.")
+                    with _m3:
+                        st.metric("Binomial (American)", f"${_binom_amer:.2f}", help=mod_gloss.tip("binomial_method"))
+                    with _m4:
+                        st.metric("Monte Carlo", f"${_mc['price']:.2f} ± {_mc['std_error']:.2f}",
+                                 help=mod_gloss.tip("monte_carlo_options_method"))
+
+                    if _solved_iv:
+                        st.caption(f"Solved implied vol from market price: {_solved_iv*100:.1f}% "
+                                  f"(yfinance reports {_mkt_iv*100:.1f}%) — small gaps are normal "
+                                  f"(stale quotes, dividend/rate assumptions).",
+                                  help=mod_gloss.tip("implied_vol_method"))
+                    if _hist_vol and _mkt_iv:
+                        _vrp = (_mkt_iv - _hist_vol) * 100
+                        st.caption(f"Volatility risk premium (implied − realized): {_vrp:+.1f}pp — "
+                                  f"{'options pricing in MORE turbulence than realized' if _vrp > 0 else 'options pricing in LESS turbulence than realized'}.")
+
+                    _greeks = mod_opt.bsm_greeks(_opt_S, _opt_K, _opt_T, _opt_r, _mkt_iv or _hist_vol or 0.3, _opt_kind)
+                    st.markdown("**Greeks** (BSM, at market/realized vol): " +
+                               " · ".join(f"{k}: {v}" for k, v in _greeks.items() if v is not None))
+
+    # ── Tab 5: Portfolio Optimizer ────────────────────────────────────────────
+    with _tab_popt:
+        st.subheader("Portfolio Optimizer — Efficient Frontier & PCA")
+
+        _popt_tp_data = mod_tp.load_all().get("portfolios", {})
+        _popt_wl_syms = [s.strip().upper() for s in
+                        _load_json(Path(__file__).parent / ".watchlist.json", default={})
+                        .get("symbols", "").split(",") if s.strip()]
+
+        _popt_source_opts = ["✏️ Custom (type below)"]
+        _popt_source_opts += [f"🎯 Tracked: {name}" for name in _popt_tp_data.keys()]
+        if _popt_wl_syms:
+            _popt_source_opts.append("👁 Watchlist")
+        _popt_source = st.selectbox("Load holdings from", _popt_source_opts, key="_al_popt_source")
+
+        _popt_current_weights = None
+        if _popt_source.startswith("🎯 Tracked: "):
+            _popt_tp_name = _popt_source[len("🎯 Tracked: "):]
+            _popt_positions = _popt_tp_data[_popt_tp_name]["positions"]
+            _popt_syms = tuple(_popt_positions.keys())
+            _popt_current_weights = {s: p["target_weight"] for s, p in _popt_positions.items()}
+            st.caption(f"Loaded {len(_popt_syms)} positions from Tracker portfolio '{_popt_tp_name}'.")
+        elif _popt_source == "👁 Watchlist":
+            _popt_syms = tuple(dict.fromkeys(_popt_wl_syms))
+            st.caption(f"Loaded {len(_popt_syms)} tickers from your Watchlist.")
+        else:
+            _popt_syms_input = st.text_input(
+                "Tickers (comma-separated, 3+)", value="AAPL, MSFT, GOOGL, AMZN, NVDA",
+                key="_al_popt_syms")
+            _popt_syms = tuple(dict.fromkeys(
+                s.strip().upper() for s in _popt_syms_input.split(",") if s.strip()
+            ))
+
+        if st.button("📈 Build Frontier & Run PCA", type="primary", key="_al_popt_run"):
+            st.session_state["_al_ef"] = mod_popt.efficient_frontier(_popt_syms)
+            st.session_state["_al_pca"] = mod_popt.pca_factors(_popt_syms)
+            st.session_state["_al_popt_current_weights"] = _popt_current_weights
+
+        _ef = st.session_state.get("_al_ef")
+        if _ef:
+            if _ef.get("error"):
+                st.error(_ef["error"])
+            else:
+                st.markdown("#### Efficient Frontier", help=mod_gloss.tip("efficient_frontier_method"))
+                _fig_ef = go.Figure()
+                _fig_ef.add_trace(go.Scatter(
+                    x=_ef["cloud"]["vol"] * 100, y=_ef["cloud"]["return"] * 100,
+                    mode="markers", marker=dict(size=4, color=_ef["cloud"]["sharpe"],
+                                                colorscale="Viridis", showscale=True,
+                                                colorbar=dict(title="Sharpe")),
+                    name="Random portfolios",
+                ))
+                if _ef["max_sharpe"]:
+                    _fig_ef.add_trace(go.Scatter(
+                        x=[_ef["max_sharpe"]["vol_pct"]], y=[_ef["max_sharpe"]["return_pct"]],
+                        mode="markers", marker=dict(size=14, color="red", symbol="star"),
+                        name="Max Sharpe"))
+                if _ef["min_vol"]:
+                    _fig_ef.add_trace(go.Scatter(
+                        x=[_ef["min_vol"]["vol_pct"]], y=[_ef["min_vol"]["return_pct"]],
+                        mode="markers", marker=dict(size=14, color="lime", symbol="star"),
+                        name="Min Vol"))
+                _fig_ef.update_layout(
+                    xaxis_title="Annualized Volatility %", yaxis_title="Annualized Return %",
+                    paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", height=420,
+                    font=dict(color="#cdd6f4"), margin=dict(l=40, r=40, t=20, b=40),
+                )
+                st.plotly_chart(_fig_ef, use_container_width=True, config={"displayModeBar": False})
+
+                _efc1, _efc2 = st.columns(2)
+                with _efc1:
+                    if _ef["max_sharpe"]:
+                        st.markdown(f"**Max Sharpe** — Return {_ef['max_sharpe']['return_pct']}% · "
+                                   f"Vol {_ef['max_sharpe']['vol_pct']}% · Sharpe {_ef['max_sharpe']['sharpe']}")
+                        st.dataframe(pd.DataFrame(_ef["max_sharpe"]["weights"].items(),
+                                                  columns=["Ticker", "Weight %"]),
+                                    use_container_width=True, hide_index=True)
+                with _efc2:
+                    if _ef["min_vol"]:
+                        st.markdown(f"**Min Vol** — Return {_ef['min_vol']['return_pct']}% · "
+                                   f"Vol {_ef['min_vol']['vol_pct']}% · Sharpe {_ef['min_vol']['sharpe']}")
+                        st.dataframe(pd.DataFrame(_ef["min_vol"]["weights"].items(),
+                                                  columns=["Ticker", "Weight %"]),
+                                    use_container_width=True, hide_index=True)
+
+                _popt_cur = st.session_state.get("_al_popt_current_weights")
+                if _popt_cur:
+                    st.markdown("---")
+                    st.markdown("#### Your Current Weights vs. Optimal")
+                    _cmp_rows = []
+                    for _sym in _ef["symbols"]:
+                        _cmp_rows.append({
+                            "Ticker":     _sym,
+                            "Current %":  _popt_cur.get(_sym, 0.0),
+                            "Max Sharpe %": (_ef["max_sharpe"]["weights"].get(_sym, 0.0)
+                                            if _ef["max_sharpe"] else None),
+                            "Min Vol %":  (_ef["min_vol"]["weights"].get(_sym, 0.0)
+                                          if _ef["min_vol"] else None),
+                        })
+                    st.dataframe(pd.DataFrame(_cmp_rows), use_container_width=True, hide_index=True)
+                    st.caption("How far your actual allocation sits from the mean-variance-optimal "
+                              "mix — a large gap isn't automatically wrong (conviction/taxes/thesis "
+                              "matter too), but it's worth knowing it exists.")
+
+        _pca = st.session_state.get("_al_pca")
+        if _pca:
+            st.markdown("---")
+            if _pca.get("error"):
+                st.error(_pca["error"])
+            else:
+                st.markdown("#### PCA Factor Decomposition", help=mod_gloss.tip("pca_method"))
+                st.caption("Loading sign is arbitrary (SVD sign ambiguity) — only magnitude matters.")
+                st.markdown(f"**PC1 explains {_pca['market_factor_pct']}% of variance** "
+                           f"— {'a HIGH shared-market bet' if _pca['market_factor_pct'] > 50 else 'meaningful real diversification exists'}.")
+                st.caption(f"Explained variance by component: "
+                          f"{', '.join(f'PC{i+1}: {p}%' for i, p in enumerate(_pca['explained_pct']))}")
+                st.markdown("**Most PC1-exposed (highest shared-factor bet):**")
+                st.dataframe(pd.DataFrame(_pca["top_pc1_exposure"].items(),
+                                          columns=["Ticker", "|PC1 loading|"]),
+                            use_container_width=True, hide_index=True)
+                st.markdown("**Least PC1-exposed (best diversifiers in this set):**")
+                st.dataframe(pd.DataFrame(_pca["bottom_pc1_exposure"].items(),
+                                          columns=["Ticker", "|PC1 loading|"]),
+                            use_container_width=True, hide_index=True)
+
+    # ── Tab 6: Validation ─────────────────────────────────────────────────────
+    with _tab_val:
+        st.subheader("Validation — does any of this actually produce alpha?")
+        st.warning(
+            "⚠️ **Honest limitation:** fundamentals-based checklists (Buffett, Piotroski, Graham, ...) "
+            "can't be walk-forward backtested — yfinance only exposes CURRENT fundamentals, not "
+            "point-in-time history, so any such backtest would bake in look-ahead bias. The two "
+            "sections below split the evidence into what CAN be tested honestly (price-only "
+            "technical signals) and what's tracked live going forward instead."
+        )
+
+        st.markdown("#### Walk-Forward Backtest — technical signals only")
+        _wf_c1, _wf_c2, _wf_c3 = st.columns(3)
+        with _wf_c1:
+            _wf_sym = st.text_input("Ticker", value="SPY", key="_al_wf_sym").strip().upper()
+        with _wf_c2:
+            _wf_strat_opts = list(mod_bt.STRATEGIES.keys())
+            _wf_strat = st.selectbox("Strategy", _wf_strat_opts,
+                                     index=_wf_strat_opts.index("Technical Consensus"),
+                                     key="_al_wf_strat")
+        with _wf_c3:
+            _wf_period = st.selectbox("History", ["2y", "3y", "5y"], index=1, key="_al_wf_period")
+
+        if st.button("▶️ Run Walk-Forward Test", type="primary", key="_al_wf_run"):
+            st.session_state["_al_wf_result"] = mod_bt.run_backtest_walkforward(
+                _wf_sym, _wf_strat, period=_wf_period)
+
+        _wf = st.session_state.get("_al_wf_result")
+        if _wf:
+            if _wf.get("error"):
+                st.error(_wf["error"])
+            else:
+                st.caption(f"Chosen params (fit on train window only): `{_wf['chosen_params']}`")
+                _wfc1, _wfc2 = st.columns(2)
+                with _wfc1:
+                    st.markdown(f"**In-Sample** ({_wf['train_period'][0]} → {_wf['train_period'][1]})")
+                    st.metric("Sharpe", f"{_wf['in_sample']['sharpe']:.2f}")
+                    st.metric("Total Return", f"{_wf['in_sample']['total_return']*100:+.1f}%")
+                    st.metric("Max Drawdown", f"{_wf['in_sample']['max_drawdown']*100:.1f}%")
+                with _wfc2:
+                    st.markdown(f"**Out-of-Sample** ({_wf['test_period'][0]} → {_wf['test_period'][1]})")
+                    st.metric("Sharpe", f"{_wf['out_of_sample']['sharpe']:.2f}")
+                    st.metric("Total Return", f"{_wf['out_of_sample']['total_return']*100:+.1f}%")
+                    st.metric("Max Drawdown", f"{_wf['out_of_sample']['max_drawdown']*100:.1f}%")
+                st.info(_wf["verdict"])
+
+        st.markdown("---")
+        st.markdown("#### Live Score Validation — composite score vs. actual forward return")
+        st.caption("Reads .score_history.json (recorded automatically every time you open Analyze). "
+                  "Accumulates over time — thin at first, more meaningful after months of use.")
+        _sv_c1, _sv_c2 = st.columns(2)
+        with _sv_c1:
+            _sv_horizon = st.select_slider("Forward horizon (days)", [7, 14, 30, 60, 90], value=30,
+                                           key="_al_sv_horizon")
+        with _sv_c2:
+            _sv_min_age = st.select_slider("Minimum score age (days)", [7, 14, 30, 60], value=30,
+                                           key="_al_sv_min_age")
+        _sv = mod_sv.bucket_analysis(horizon_days=_sv_horizon, min_age_days=_sv_min_age)
+        if _sv["n_total"] == 0:
+            _sv_note = f" (oldest record: {_sv['oldest_record']})" if _sv["oldest_record"] else ""
+            st.info(f"No forward-return-eligible scores yet{_sv_note}. Keep using Analyze/Weekly "
+                   f"Picks — this fills in over time.")
+        else:
+            st.dataframe(pd.DataFrame(_sv["buckets"]), use_container_width=True, hide_index=True)
+            st.caption(f"{_sv['n_total']} samples, {_sv_horizon}-day forward horizon, "
+                      f"oldest record {_sv['oldest_record']}.")
+
+    # ── Tab 7: Sources & Principles ───────────────────────────────────────────
+    with _tab_src:
+        st.subheader("Sources & Principles — where each model comes from")
+        st.caption("Every mechanical model in Fund Models / Alpha Lab traces back to a named "
+                  "investor, book, or academic paper — not an arbitrary rule. Use this to go "
+                  "back and study the source material in full.")
+        _src_rows = [
+            {"Framework": "Minervini Trend Template", "Source": "Mark Minervini — Trade Like a Stock Market Wizard"},
+            {"Framework": "Turtle / Donchian Breakout", "Source": "Richard Dennis's Turtles — Curtis Faith, Way of the Turtle"},
+            {"Framework": "Managed-Futures Trend Following", "Source": "AQR/Man AHL-style trend following; RN SB Markets & Trading"},
+            {"Framework": "Druckenmiller Playbook", "Source": "Stanley Druckenmiller interviews/letters"},
+            {"Framework": "Kelly Sizing", "Source": "J.L. Kelly (1956); Ed Thorp practice — RN SB Risk-of-Ruin/Kelly cluster"},
+            {"Framework": "Factor Profile", "Source": "Fama-French factors; AQR factor-investing research"},
+            {"Framework": "Risk Parity", "Source": "Ray Dalio / Bridgewater All Weather"},
+            {"Framework": "Buffett Checklist", "Source": "Warren Buffett shareholder letters"},
+            {"Framework": "Munger Filter", "Source": "Charlie Munger — inversion / Poor Charlie's Almanack"},
+            {"Framework": "Lynch Check", "Source": "Peter Lynch — One Up on Wall Street"},
+            {"Framework": "Graham Number", "Source": "Benjamin Graham — The Intelligent Investor"},
+            {"Framework": "Greenblatt Magic Formula", "Source": "Joel Greenblatt — The Little Book That Beats the Market"},
+            {"Framework": "CANSLIM", "Source": "William O'Neil — How to Make Money in Stocks"},
+            {"Framework": "Bogle Test", "Source": "John Bogle — Vanguard founder, passive-investing case"},
+            {"Framework": "Piotroski F-Score", "Source": "Joseph Piotroski (2000), University of Chicago"},
+            {"Framework": "Altman Z-Score", "Source": "Edward Altman (1968), NYU"},
+            {"Framework": "Templeton", "Source": "Sir John Templeton — maximum pessimism"},
+            {"Framework": "O'Shaughnessy Cornerstone Growth", "Source": "James O'Shaughnessy — What Works on Wall Street; RN SB relative-strength-systems note"},
+            {"Framework": "Kirkpatrick Relative Strength", "Source": "Kirkpatrick & Dahlquist — Technical Analysis: The Complete Resource; RN SB same note"},
+            {"Framework": "Risk of Ruin", "Source": "Classic gambling/trading theory; Ralph Vince payoff-adjusted variant — RN SB Technical Analysis & Trading Systems"},
+            {"Framework": "Murphy Money Management", "Source": "John Murphy — Technical Analysis of the Financial Markets; RN SB same folder"},
+            {"Framework": "Calmar Ratio / Ulcer Index", "Source": "Calmar (1991); Peter Martin's Ulcer Index (1987) — RN SB performance-metrics cluster"},
+            {"Framework": "Walk-Forward Validation", "Source": "RN SB — Trading System Design Checklist / Ten Performance Criteria for Judging a Backtest"},
+            {"Framework": "Trading Psychology Bias Check", "Source": "Andrew Lo — Adaptive Markets; Malkiel — A Random Walk Down Wall Street; RN SB Efficient Markets vs Behavioral & Adaptive Finance"},
+            {"Framework": "Black-Scholes-Merton", "Source": "Black, Scholes, Merton (1973); RN SB Python for Finance - Quantitative Analytics (Hilpisch)"},
+            {"Framework": "Binomial (CRR) Option Pricing", "Source": "Cox, Ross, Rubinstein (1979); RN SB Python for Finance - Quantitative Analytics"},
+            {"Framework": "Monte Carlo Option Pricing", "Source": "RN SB Python for Finance - Quantitative Analytics (antithetic variates)"},
+            {"Framework": "Implied Volatility Solver", "Source": "Standard options-market inversion of BSM via Brent's method"},
+            {"Framework": "Efficient Frontier (Markowitz)", "Source": "Markowitz (1952); RN SB Python for Finance - Quantitative Analytics"},
+            {"Framework": "PCA Factor Decomposition", "Source": "RN SB Python for Finance - Quantitative Analytics"},
+        ]
+        st.dataframe(pd.DataFrame(_src_rows), use_container_width=True, hide_index=True)
+
+
+# ─── Page: Glossary ────────────────────────────────────────────────────────────
+elif page == "📖 Glossary":
+    st.title("📖 Glossary")
+    st.caption("Every term used across the dashboard, in plain language — search or browse by category.")
+
+    _gloss_search = st.text_input("🔍 Search a term", "", key="_gloss_search",
+                                   placeholder="e.g. sharpe, PEG, breakout, WACC…").strip().lower()
+
+    # Section -> ordered list of keys into _TIP/_EXPLAIN (this file) and/or
+    # mod_gloss.TIP (modules/glossary.py). Prefer the plain-language _EXPLAIN
+    # text where one exists; otherwise fall back to _TIP's hover text; glossary
+    # keys use mod_gloss.tip(). One page, one list, no more hunting for where
+    # a term is or isn't explained.
+    _GLOSS_SECTIONS: list[tuple[str, list[str]]] = [
+        ("💰 Valuation", ["Price", "Market Cap", "P/S Ratio", "Forward P/E", "PEG Ratio",
+                          "52W Range", "ev_ebitda", "dcf", "wacc", "terminal_value", "intrinsic_value"]),
+        ("📈 Growth & Margins", ["Revenue Growth", "Earnings Growth", "Rule of 40", "Gross Margin",
+                                 "FCF Yield", "FCF Margin", "R&D % Revenue", "Debt/Equity",
+                                 "profit_margin", "roe", "fcf", "ocf_ni", "sbc", "dilution"]),
+        ("📊 Technical", ["Trend (MA)", "RSI", "MACD", "Volume", "52W Position",
+                          "ma200", "ma50", "atr", "bollinger", "golden_cross", "rs_line"]),
+        ("🏦 Institutional & Flow", ["Short Interest", "Institutional Ownership", "Rate Sensitivity",
+                                     "China Exposure", "13f", "mspr", "insider", "call_put_ratio"]),
+        ("🎯 Composite Scores", ["Fundamental", "Technical", "Momentum", "Smart Money", "Macro", "Relative"]),
+        ("🧑‍💼 Expert Panel & Trade Plan", ["Conviction", "Position Size", "Stop Loss", "Target Price",
+                                          "r_multiple", "reward_risk", "position_sizing", "chandelier",
+                                          "hedging", "leverage"]),
+        ("🌡 Market Regime & Macro", ["VIX", "10Y Yield", "S&P 1M", "QQQ 1M", "vix", "yield_curve",
+                                     "hy_spread", "dxy", "risk_on_off", "market_breadth"]),
+        ("⚖ Risk & Portfolio", ["beta", "sharpe", "sortino", "max_drawdown", "var", "volatility",
+                                "correlation", "risk_parity", "kelly", "drift", "rebalancing",
+                                "monte_carlo", "stress_test"]),
+        ("🔎 Weekly Picks & Screeners", ["RVOL", "Call/Put", "3M Ret", "PT Up", "Bulls", "Rev Gr",
+                                        "GM", "Weekly Score", "Options", "Breakout", "Analyst", "Model",
+                                        "rs", "momentum_dir", "weekly_score", "bull_pct",
+                                        "breakout_score", "composite_health", "sector_rotation", "grade"]),
+        ("🧠 Strategy & Trading", ["alpha", "momentum_factor", "value_factor", "quality_factor",
+                                  "seasonality", "expectancy", "conviction", "time_horizon"]),
+        ("📉 Backtesting", ["cagr", "win_rate", "profit_factor", "equity_curve", "benchmark", "backtest"]),
+        ("🎓 Guru Methods", ["minervini_method", "turtle_method", "trend_following_method", "kelly_method",
+                            "druckenmiller_method", "factor_method", "risk_parity_method", "panel_method",
+                            "buffett_method", "munger_method", "lynch_method", "graham_method",
+                            "greenblatt_method", "canslim_method", "bogle_method", "shiller_method",
+                            "buffett_indicator", "fear_greed", "piotroski_method", "altman_method",
+                            "templeton_method", "opportunity_lens", "reversal_signals", "falling_knife",
+                            "analyst_grades", "congress_trading"]),
+    ]
+
+    def _gloss_lookup(key: str) -> tuple[str, str]:
+        """Returns (display_term, definition) for a _TIP/_EXPLAIN key or a
+        modules/glossary.py snake_case key."""
+        if key in _TIP or key in _EXPLAIN:
+            return key, (_EXPLAIN.get(key) or _TIP.get(key, ""))
+        txt = mod_gloss.tip(key)
+        if ":" in txt[:60]:
+            term, definition = txt.split(":", 1)
+            return term.strip(), definition.strip()
+        return key.replace("_", " ").title(), txt
+
+    _any_shown = False
+    for _sec_name, _sec_keys in _GLOSS_SECTIONS:
+        _sec_rows = []
+        for _k in _sec_keys:
+            _term, _def = _gloss_lookup(_k)
+            if not _def:
+                continue
+            if _gloss_search and _gloss_search not in _term.lower() and _gloss_search not in _def.lower():
+                continue
+            _sec_rows.append((_term, _def))
+        if not _sec_rows:
+            continue
+        _any_shown = True
+        st.markdown(f"#### {_sec_name}")
+        for _term, _def in _sec_rows:
+            st.markdown(
+                f'<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;'
+                f'padding:10px 16px;margin-bottom:6px">'
+                f'<b style="color:#e8edf8">{_html.escape(_term)}</b>'
+                f'<div style="color:#8a9bc2;font-size:13px;margin-top:2px">{_html.escape(_def)}</div>'
+                f'</div>', unsafe_allow_html=True,
+            )
+        st.markdown("")
+
+    if not _any_shown:
+        st.info(f"No terms match \"{_gloss_search}\" — try a different word.")

@@ -5,7 +5,7 @@ historical price reaction, BMO/AMC timing, and EPS trend data.
 import yfinance as yf
 import pandas as pd
 import streamlit as st
-from datetime import date, datetime, timezone
+from datetime import date
 from utils.cache import get_ticker_info, get_price_history
 
 

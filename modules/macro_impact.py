@@ -5,7 +5,6 @@ Cached per (symbol, indicators_summary) for 1 hour.
 """
 import json
 import streamlit as st
-import anthropic
 from config import ANTHROPIC_API_KEY
 
 from utils.claude_client import get_client as _get_client

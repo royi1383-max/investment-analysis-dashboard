@@ -27,7 +27,7 @@ import pandas as pd
 import streamlit as st
 from pathlib import Path
 
-from config import ANTHROPIC_API_KEY, FINNHUB_API_KEY
+from config import FINNHUB_API_KEY
 from utils.cache import get_ticker_info, get_price_history
 from utils.persist import load_json, save_json
 from utils.indicators import rsi_last, trailing_return

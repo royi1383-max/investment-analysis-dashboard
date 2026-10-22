@@ -7,7 +7,6 @@ Results are cached per (symbol, rounded_price) for 2 hours.
 import re
 import json
 import streamlit as st
-import anthropic
 
 from config import ANTHROPIC_API_KEY, EXPERTS
 

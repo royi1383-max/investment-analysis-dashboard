@@ -5,7 +5,6 @@ Results cached per (symbol, sector, industry) for 2 hours.
 """
 import json
 import streamlit as st
-import anthropic
 
 from config import ANTHROPIC_API_KEY
 from utils.cache import get_ticker_info

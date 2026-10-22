@@ -1,9 +1,10 @@
 """
 SEC EDGAR 13F Smart Money Tracker.
-Fetches institutional holdings from 13F-HR filings for ~11 famous hedge funds.
+Fetches institutional holdings from 13F-HR filings for ~21 famous hedge funds.
 No API key required — SEC EDGAR is free (rate limit: 10 req/s).
 Data is ~45 days delayed (SEC filing deadline).
 """
+import os
 import re
 import json
 import time
@@ -11,7 +12,8 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import streamlit as st
 
-_HEADERS = {"User-Agent": "InvestmentDashboard royi1383@gmail.com"}
+# SEC asks API clients to identify themselves; set SEC_CONTACT_EMAIL in .env to your own address.
+_HEADERS = {"User-Agent": f"InvestmentDashboard {os.getenv('SEC_CONTACT_EMAIL', 'contact-not-set@example.com')}"}
 _NS = "http://www.sec.gov/edgar/document/thirteenf/informationtable"
 
 FAMOUS_FUNDS: dict[str, dict] = {
@@ -26,6 +28,18 @@ FAMOUS_FUNDS: dict[str, dict] = {
     "Renaissance Tech":  {"cik": "0001037389", "style": "Quant"},
     "Cathie Wood (ARK)": {"cik": "0001697748", "style": "Disruptive Tech"},
     "Michael Burry":     {"cik": "0001649339", "style": "Contrarian"},
+    # Expanded set (added for broader smart-money coverage) — CIKs verified
+    # against SEC EDGAR company search, not guessed.
+    "Soros Fund Mgmt":   {"cik": "0001029160", "style": "Macro"},
+    "Berkshire Hathaway":{"cik": "0001067983", "style": "Value"},
+    "Third Point":       {"cik": "0001040273", "style": "Event-Driven"},
+    "Greenlight Capital":{"cik": "0001079114", "style": "Value/Short"},
+    "Citadel Advisors":  {"cik": "0001423053", "style": "Multi-Strat"},
+    "Two Sigma":         {"cik": "0001179392", "style": "Quant"},
+    "Millennium Mgmt":   {"cik": "0001273087", "style": "Multi-Strat"},
+    "Point72":           {"cik": "0001603466", "style": "Multi-Strat"},
+    "D.E. Shaw":         {"cik": "0001009268", "style": "Quant"},
+    "Elliott Mgmt":      {"cik": "0001791786", "style": "Activist"},
 }
 
 

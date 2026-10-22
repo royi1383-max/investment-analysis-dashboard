@@ -33,6 +33,8 @@ def compute_risk(symbols: list[str], weights: list[float]) -> dict:
       var_95_1w           float   (negative %, 1-week scaled)
       annual_vol_pct      float   annualised portfolio volatility
       sharpe_approx       float   annualised Sharpe (0% risk-free)
+      calmar_ratio        float   CAGR / |max drawdown| — return per unit of worst pain
+      ulcer_index         float   RMS drawdown depth — penalizes deep AND prolonged drawdowns
       concentration_hhi   float   0-1 Herfindahl index
       risk_flags          list[str]
     """
@@ -84,9 +86,20 @@ def compute_risk(symbols: list[str], weights: list[float]) -> dict:
     var_1w = var_1d * np.sqrt(5)
 
     # ── Annualised vol & Sharpe ──────────────────────────────────────────────
+    # Guards use a small epsilon, not bare truthiness — std()/drawdown can land
+    # on floating-point noise (e.g. 1e-14) for a near-flat return series,
+    # which is still "truthy" and would otherwise blow Sharpe/Calmar up to
+    # absurd magnitudes instead of the intended 0.0 fallback.
+    _EPS = 1e-9
     ann_vol = float(port_rets.std()) * np.sqrt(252) * 100
     ann_ret = float(port_rets.mean()) * 252 * 100
-    sharpe  = ann_ret / ann_vol if ann_vol else 0.0
+    sharpe  = ann_ret / ann_vol if abs(ann_vol) > _EPS else 0.0
+
+    # ── Calmar Ratio (CAGR / |max drawdown|) ─────────────────────────────────
+    calmar = (ann_ret / abs(max_dd)) if abs(max_dd) > _EPS else 0.0
+
+    # ── Ulcer Index (RMS of drawdown depth — penalizes depth AND duration) ───
+    ulcer_index = float(np.sqrt(((dd * 100) ** 2).mean()))
 
     # ── Concentration (HHI) ──────────────────────────────────────────────────
     hhi = float(np.sum(vw ** 2))
@@ -136,6 +149,8 @@ def compute_risk(symbols: list[str], weights: list[float]) -> dict:
         "var_95_1w":          round(var_1w, 2),
         "annual_vol_pct":     round(ann_vol, 1),
         "sharpe_approx":      round(sharpe, 2),
+        "calmar_ratio":       round(calmar, 2),
+        "ulcer_index":        round(ulcer_index, 2),
         "concentration_hhi":  round(hhi, 3),
         "risk_flags":         flags,
     }

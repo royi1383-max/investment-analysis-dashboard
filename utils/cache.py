@@ -19,6 +19,8 @@ def get_price_history(symbol: str, period: str = "2y", interval: str = "1d") -> 
         df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=True)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+        if "Close" in df.columns:
+            df = df[df["Close"].notna()]
         return df
     except Exception as e:
         print(f"[cache] get_price_history({symbol}, {period}) failed: {e}", file=sys.stderr)

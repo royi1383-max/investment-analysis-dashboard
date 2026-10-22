@@ -1,7 +1,9 @@
 """
 Weekly Recommendations Engine — automatic, no user input.
 
-Scans WEEKLY_UNIVERSE against five pillars:
+Scans the broad-market stock universe (WEEKLY_UNIVERSE unioned with the
+live S&P 500 constituent list — see _full_stock_universe) against five
+pillars:
   1. Fundamental quality
   2. Technical + momentum
   3. Analyst consensus (Yahoo Finance primary)
@@ -11,12 +13,21 @@ Scans WEEKLY_UNIVERSE against five pillars:
 Entry thresholds are calibrated to the current market regime
 (Risk-On / Neutral / Risk-Off) from market_context.get_regime().
 
-Claude produces a full "Buy Thesis" for each qualifying name:
+Three qualification paths feed one final ranked list (see FINAL_CAP):
+  SWING       — passes the strict entry-condition gate (_passes_entry)
+  QUALITY_DIP — good business, price knocked down for reasons that don't
+                reflect the business itself (Opportunity Lens' "QUALITY ON
+                SALE" quadrant — see _check_quality_dip)
+  ETF_THEME   — theme/sector ETFs scored on trend strength alone, no
+                fundamentals gate (see _scan_etfs)
+
+Claude produces a full "Buy Thesis" for each qualifying STOCK:
   why now · when to enter · target · stop · macro relevance · key risk
+ETFs get a rule-based thesis instead (see _etf_thesis) — "is this theme
+trending" isn't a company-specific buy case an LLM call adds much to.
 """
 import json
 import hashlib
-import anthropic
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -26,6 +37,8 @@ from pathlib import Path
 
 from config import ANTHROPIC_API_KEY, FINNHUB_API_KEY, WEEKLY_UNIVERSE
 from utils.cache import get_ticker_info, get_price_history
+import modules.sector_strength as sector_strength
+import modules.opportunity as opportunity
 
 # ── Disk path for pick history (alongside the wp cache file in app root) ──────
 _WP_HISTORY_PATH = Path(__file__).parent.parent / ".wp_history.json"
@@ -38,6 +51,41 @@ from modules import fundamental, technical, momentum as mom_module, scoring
 from modules.finnhub_data  import fetch_all as finnhub_fetch
 from modules.options_flow  import analyze as options_analyze
 from modules.market_context import get_regime
+
+
+# ── Broad-market universe ──────────────────────────────────────────────────────
+# WEEKLY_UNIVERSE alone is a fixed ~223-ticker hand-curated list — a closed
+# circle that can't surface anything not already typed into config.py. This
+# unions it with the live S&P 500 constituent list (scraped from Wikipedia —
+# free, no API key, self-updating as the index changes) so the scan actually
+# covers the broad market, not just names someone remembered to add.
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _sp500_constituents() -> list[str]:
+    """S&P 500 tickers. Returns [] on any failure (network, page structure
+    change) so a scan degrades to the curated WEEKLY_UNIVERSE alone rather
+    than crashing — this is a broadening layer, not a hard dependency."""
+    try:
+        import urllib.request
+        from io import StringIO
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8")
+        df = pd.read_html(StringIO(html))[0]
+        # yfinance wants BRK-B, not BRK.B
+        return [str(s).strip().replace(".", "-") for s in df["Symbol"].tolist()]
+    except Exception:
+        return []
+
+
+def _full_stock_universe() -> list[str]:
+    """WEEKLY_UNIVERSE first (preserves the existing anchor group unchanged)
+    unioned with the live S&P 500 list, deduped."""
+    seen = list(dict.fromkeys(WEEKLY_UNIVERSE))
+    for sym in _sp500_constituents():
+        if sym not in seen:
+            seen.append(sym)
+    return seen
 
 
 # ── Weekly universe rotation ──────────────────────────────────────────────────
@@ -329,6 +377,98 @@ def _breakout_data(symbol: str) -> dict:
         return {"score": 5, "signals": [], "setup": "Error"}
 
 
+# ── ETF theme scan ──────────────────────────────────────────────────────────────
+# ETFs have no fundamentals to score — qualifying them on the stock filter
+# (_passes_entry, which checks fundamental/analyst-consensus/options) makes
+# no sense. They qualify on trend/relative strength + breakout setup alone,
+# reusing sector_strength.py's existing ETF strength scorer (same one behind
+# the Analyze page's Sector Context cards) so "what's a strong theme right
+# now" comes from one scoring method, not two.
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _score_etf(symbol: str) -> dict:
+    try:
+        strength = sector_strength.etf_strength(symbol)
+        if not strength:
+            return {}
+        breakout = _breakout_data(symbol)
+        info = get_ticker_info(symbol)
+        return {
+            "symbol":          symbol,
+            "name":            info.get("longName") or info.get("shortName") or symbol,
+            "price":           strength.get("price"),
+            "strength_score":  strength.get("score", 5),
+            "grade":           strength.get("grade", ""),
+            "r1m":             strength.get("r1m"),
+            "r3m":             strength.get("r3m"),
+            "rs1m":            strength.get("rs1m"),
+            "above_50":        strength.get("above_50"),
+            "above_200":       strength.get("above_200"),
+            "breakout_score":  breakout.get("score", 5),
+            "breakout_setup":  breakout.get("setup", ""),
+        }
+    except Exception:
+        return {}
+
+
+def _scan_etfs(etf_universe: list[str], min_score: float = 6.5) -> list[dict]:
+    qualified = []
+    for sym in etf_universe:
+        d = _score_etf(sym)
+        if not d:
+            continue
+        composite = round(d["strength_score"] * 0.7 + d["breakout_score"] * 0.3, 2)
+        if composite >= min_score:
+            d["weekly_score"] = composite
+            d["category"]     = "ETF_THEME"
+            qualified.append(d)
+    qualified.sort(key=lambda x: x["weekly_score"], reverse=True)
+    return qualified
+
+
+def _etf_thesis(etf: dict) -> dict:
+    """Rule-based, not Claude — an ETF thesis is 'is the theme trending',
+    not a company-specific buy case, so it doesn't need an LLM call."""
+    r1m, r3m, rs1m = etf.get("r1m") or 0, etf.get("r3m") or 0, etf.get("rs1m") or 0
+    return {
+        "action":       "BUY" if etf["weekly_score"] >= 7.5 else "WATCH",
+        "conviction":   4 if etf["weekly_score"] >= 7.5 else 3,
+        "quality_flag": "THEME ETF",
+        "headline":     f"{etf.get('grade','Strong')} theme momentum — {r1m:+.1f}% 1M, {r3m:+.1f}% 3M",
+        "why_buy": [
+            f"Relative strength vs SPY: {rs1m:+.1f}% (1M)",
+            f"{'Above' if etf.get('above_200') else 'Below'} its 200-day moving average",
+            f"Breakout setup: {etf.get('breakout_setup') or 'no clear setup'}",
+        ],
+        "macro_relevance":     "Sector/theme-level flow — check the Sector Rotation page for the broader picture.",
+        "investor_psychology": "Trend-following: the thesis is that money is already rotating into this theme.",
+        "when_buy":   "Current price — this is a momentum/trend play, not a dip entry.",
+        "target_zone": "No single target — hold while relative strength vs SPY stays positive.",
+        "stop_loss":  "A close back below the 50-day moving average invalidates the trend.",
+        "key_risk":   "Theme rotation — sector momentum can reverse faster than a single stock's fundamentals would.",
+        "catalyst_this_week": "Broad sector/theme flow rather than a single company event.",
+    }
+
+
+# ── Quality-dip carve-out ────────────────────────────────────────────────────────
+# The strict swing filter (_passes_entry) requires technical/momentum
+# strength — which by definition excludes "good business, temporarily
+# beaten-down stock," even though that's a real, distinct opportunity (buy
+# quality at a price the business's own fundamentals don't justify). Reuses
+# Opportunity Lens' quality-vs-condition read instead of re-deriving it.
+
+def _check_quality_dip(symbol: str) -> dict | None:
+    try:
+        opp = opportunity.analyze(symbol)
+        if opp.get("error"):
+            return None
+        if opp.get("quadrant") == "QUALITY ON SALE":
+            return opp
+    except Exception:
+        pass
+    return None
+
+
 # ── Composite weekly score ─────────────────────────────────────────────────────
 
 def _composite(model: dict, analyst_s: float, mom: dict,
@@ -490,18 +630,31 @@ Respond ONLY with valid JSON (no markdown fences):
 
 # ── Main: run automatic recommendations ───────────────────────────────────────
 
+FINAL_CAP = 15   # max total picks shown — stocks + ETFs combined
+MAX_ETFS  = 5    # ETFs never crowd out more than a third of the final list
+
+
 def run_recommendations(progress_cb=None) -> dict:
     """
-    Scans a weekly-rotated subset of WEEKLY_UNIVERSE (60 stocks: 30 anchor + 30 rotating),
-    filters by market regime, applies recency penalty and sector cap, returns:
+    Scans a weekly-rotated subset of the broad-market universe (WEEKLY_UNIVERSE
+    unioned with the live S&P 500 list — see _full_stock_universe), filters by
+    market regime, applies recency penalty and sector cap. Alongside the
+    strict swing-entry filter, also carves out "quality on sale" stocks (good
+    business, beaten-down price — see _check_quality_dip) that the swing
+    filter would otherwise reject outright, and separately scans a pool of
+    theme/sector ETFs for trend strength. All three feed into ONE ranked,
+    capped list (see FINAL_CAP/MAX_ETFS) rather than three separate ones.
+    Returns:
       {
         "regime": <regime dict>,
-        "recommendations": [<qualified stock dicts>],
+        "recommendations": [<qualified dicts, each tagged "category">],
         "scanned": <int>,
         "filtered_out": <int>,
         "week_num": <int>,
+        "universe_size": <int>,   # size of the full deduped stock universe
       }
-    All results include Claude Buy Thesis if API key is set.
+    Stock rows include Claude Buy Thesis if API key is set; ETF rows get a
+    rule-based thesis (an LLM call doesn't fit "is this theme trending").
     """
     regime      = get_regime()
     thresholds  = regime["thresholds"]
@@ -509,7 +662,8 @@ def run_recommendations(progress_cb=None) -> dict:
     pick_history = _load_pick_history()
     _FH_BREAKER["failures"] = 0   # fresh scan — give Finnhub another chance
 
-    scan_universe = _get_weekly_sample(WEEKLY_UNIVERSE)
+    full_universe = _full_stock_universe()
+    scan_universe = _get_weekly_sample(full_universe, n_anchor=30, n_rotating=50)
     total         = len(scan_universe)
     all_results   = []
 
@@ -588,42 +742,87 @@ def run_recommendations(progress_cb=None) -> dict:
         r["recency_penalty"] = penalty
         r["weekly_score"]    = round(max(1.0, r["weekly_score"] - penalty), 2)
 
-    # ── Filter: keep only stocks that pass entry conditions ───────────────────
-    qualified = [r for r in all_results if _passes_entry(r, thresholds)]
+    # ── Filter: swing entries pass the strict condition gate ──────────────────
+    swing_qualified = [r for r in all_results if _passes_entry(r, thresholds)]
+    for r in swing_qualified:
+        r["category"] = "SWING"
+    swing_syms = {r["symbol"] for r in swing_qualified}
+
+    # ── Quality-dip carve-out — good business, price out of favor, would
+    # otherwise be rejected outright by the swing filter above ────────────────
+    if progress_cb:
+        progress_cb(0.75, "Checking for quality stocks on sale…")
+    dip_qualified = []
+    dip_candidates = [r for r in all_results
+                      if r["symbol"] not in swing_syms and (r.get("fundamental") or 0) >= 6.5]
+    for r in dip_candidates:
+        opp = _check_quality_dip(r["symbol"])
+        if opp:
+            r = dict(r)
+            r["category"]              = "QUALITY_DIP"
+            r["opportunity_quadrant"]  = opp.get("quadrant")
+            r["opportunity_guidance"]  = opp.get("guidance")
+            r["quality_score"]         = opp.get("quality")
+            r["condition_score"]       = opp.get("condition")
+            dip_qualified.append(r)
+    dip_qualified.sort(key=lambda x: x["weekly_score"], reverse=True)
+
+    stock_pool = swing_qualified + dip_qualified
+    stock_pool.sort(key=lambda x: x["weekly_score"], reverse=True)
+    stock_pool = _apply_sector_cap(stock_pool, max_per_sector=2)
+
+    # ── ETF theme scan — separate pool, separate scoring method ───────────────
+    if progress_cb:
+        progress_cb(0.85, "Scanning theme ETFs…")
+    etf_qualified = _scan_etfs(sector_strength.theme_etf_universe())
+
+    # ── Combine into ONE ranked, capped list — ETFs never take more than
+    # MAX_ETFS slots, but backfill with more ETFs if stocks come up short ────
+    n_etf = min(MAX_ETFS, len(etf_qualified))
+    n_stock_slots = FINAL_CAP - n_etf
+    stock_final = stock_pool[:n_stock_slots]
+    if len(stock_final) < n_stock_slots:
+        n_etf = min(len(etf_qualified), n_etf + (n_stock_slots - len(stock_final)))
+    qualified = stock_final + etf_qualified[:n_etf]
     qualified.sort(key=lambda x: x["weekly_score"], reverse=True)
 
-    # ── Apply sector diversity cap (max 2 per sector) ─────────────────────────
-    qualified = _apply_sector_cap(qualified, max_per_sector=2)
-
-    # ── Claude Buy Thesis for qualifying stocks ───────────────────────────────
+    # ── Claude Buy Thesis — stocks only (an LLM "buy case" doesn't fit an
+    # ETF's "is the theme trending" question; those get a rule-based one) ─────
+    stock_rows = [r for r in qualified if r.get("category") != "ETF_THEME"]
+    etf_rows   = [r for r in qualified if r.get("category") == "ETF_THEME"]
     if progress_cb:
-        progress_cb(0.92, f"Claude generating buy theses for {len(qualified)} stocks…")
+        progress_cb(0.92, f"Claude generating buy theses for {len(stock_rows)} stocks…")
 
     thesis_error = None
     thesis_warning = None
-    if ANTHROPIC_API_KEY and qualified:
-        theses = claude_buy_thesis(qualified, regime)
+    if ANTHROPIC_API_KEY and stock_rows:
+        theses = claude_buy_thesis(stock_rows, regime)
         thesis_error = theses.get("_error")
         thesis_warning = theses.get("_warning")
-        for r in qualified:
+        for r in stock_rows:
             r["thesis"] = theses.get(r["symbol"], {})
     else:
-        for r in qualified:
+        for r in stock_rows:
             r["thesis"] = {}
+    for r in etf_rows:
+        r["thesis"] = _etf_thesis(r)
 
-    # ── Persist pick history for next week's recency penalty ─────────────────
+    # ── Persist pick history for next week's recency penalty (stocks only —
+    # ETFs aren't subject to the recency penalty, they're a different asset
+    # class and "the theme is still hot" isn't staleness) ─────────────────────
     new_history = dict(pick_history)
-    for r in qualified:
+    for r in stock_rows:
         new_history[r["symbol"]] = current_week
     # Prune entries older than 6 weeks to keep the file small
     new_history = {sym: wk for sym, wk in new_history.items()
                    if abs(current_week - wk) <= 6 or (current_week < 6 and 53 - wk + current_week <= 6)}
     _save_pick_history(new_history)
 
-    # Top 5 near-misses — stocks that were scanned but didn't qualify,
-    # sorted by weekly_score descending so the UI can show "who almost made it"
-    qualified_syms = {r["symbol"] for r in qualified}
-    not_qualified  = [r for r in all_results if r["symbol"] not in qualified_syms]
+    # Top 5 near-misses — stocks that were scanned but didn't qualify for the
+    # strict swing filter, sorted by weekly_score so the UI can show "who
+    # almost made it" (quality-dip/ETF paths don't affect this — it's
+    # specifically about the swing entry conditions shown alongside it).
+    not_qualified = [r for r in all_results if r["symbol"] not in swing_syms]
     not_qualified.sort(key=lambda x: x.get("weekly_score", 0), reverse=True)
     near_misses = [{
         "symbol":      r["symbol"],
@@ -642,10 +841,14 @@ def run_recommendations(progress_cb=None) -> dict:
         "regime":          regime,
         "recommendations": qualified,
         "scanned":         total,
-        "filtered_out":    total - len(qualified),
+        "filtered_out":    total - len(swing_qualified),
+        "n_swing":         len(swing_qualified),
+        "n_dip":           len(dip_qualified),
+        "n_etf":           len(etf_qualified),
         "near_misses":     near_misses,
         "thresholds":      thresholds,
         "week_num":        current_week,
+        "universe_size":   len(full_universe),
         "pick_history":    new_history,
         "thesis_error":    thesis_error,
         "thesis_warning":  thesis_warning,

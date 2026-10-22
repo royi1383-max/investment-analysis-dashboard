@@ -324,6 +324,8 @@ def analyze_stock(symbol: str) -> dict:
             "piotroski": (_pio := piotroski_fscore(symbol)),
             "altman":    altman_z(symbol),
             "templeton": templeton_check(info, close, _pio.get("score")),
+            "oshaughnessy": oshaughnessy_cornerstone(info, close),
+            "kirkpatrick":  kirkpatrick_relative_strength(close),
             "error":     None,
         }
     except Exception as e:
@@ -732,3 +734,223 @@ def templeton_check(info: dict, close, fscore: int | None) -> dict:
                    f"Watch for capitulation + stabilizing fundamentals.")
         color = "warn"
     return {"drawdown": round(dd, 1), "rsi": rsi, "verdict": verdict, "color": color}
+
+
+# ═══ Relative-strength systems: O'Shaughnessy, Kirkpatrick ════════════════════
+
+def oshaughnessy_cornerstone(info: dict, close: pd.Series) -> dict:
+    """O'Shaughnessy 'Cornerstone Growth' (What Works on Wall Street): quality
+    growth, cheap on sales, confirmed by price leadership — not cheap on
+    earnings (growth screens tolerate that; they demand proof via the tape)."""
+    checks = []
+    mc = info.get("marketCap")
+    checks.append(("Market cap >= $200M (avoid micro-caps)",
+                   mc is not None and mc >= 200e6,
+                   f"${mc/1e9:.1f}B" if mc else "N/A"))
+    qg = info.get("earningsQuarterlyGrowth")
+    checks.append(("Quarterly EPS growth > 0",
+                   qg is not None and qg > 0,
+                   f"{qg*100:+.0f}%" if qg is not None else "N/A"))
+    sg = info.get("revenueGrowth")
+    checks.append(("Sales growth > 0",
+                   sg is not None and sg > 0,
+                   f"{sg*100:+.0f}%" if sg is not None else "N/A"))
+    mc_, rev = info.get("marketCap"), info.get("totalRevenue")
+    ps = mc_ / rev if mc_ and rev else None
+    checks.append(("Price/Sales < 1.5 (Cornerstone's cheap-on-sales filter)",
+                   ps is not None and ps < 1.5,
+                   f"{ps:.2f}" if ps is not None else "N/A"))
+    leader = None
+    if close is not None and len(close) > 253:
+        r12m = trailing_return(close, 252)
+        try:
+            spy = get_price_history("SPY", period="2y")["Close"].squeeze()
+            spy_r12m = trailing_return(spy, 252)
+            leader = r12m is not None and spy_r12m is not None and r12m > spy_r12m
+        except Exception:
+            pass
+    checks.append(("Relative Strength: beats SPY over 12M",
+                   bool(leader), "leads the tape" if leader else "N/A"))
+
+    passed = sum(1 for _, ok, _ in checks if ok)
+    if passed >= 4:
+        verdict = "CORNERSTONE GROWTH CANDIDATE — growth confirmed by price leadership, still cheap on sales"
+    elif passed >= 2:
+        verdict = "PARTIAL — some growth/leadership present, doesn't clear the full screen"
+    else:
+        verdict = "Fails the Cornerstone Growth screen"
+    return {"checks": checks, "passed": passed, "total": len(checks), "verdict": verdict}
+
+
+def kirkpatrick_relative_strength(close: pd.Series, percentile: float | None = None) -> dict:
+    """Kirkpatrick & Dahlquist multi-window relative-strength model: blend
+    short/medium/long-term relative performance vs SPY (recent-weighted),
+    the common thread across CANSLIM/O'Shaughnessy/Value Line-style systems.
+    `percentile` (0-100), when supplied by a universe scan, replaces the
+    single-stock heuristic with the stock's true rank in that scan."""
+    out = {"r3m": None, "r6m": None, "r12m": None, "composite_pct": None,
+           "score": None, "percentile": percentile, "verdict": "N/A"}
+    if close is None or len(close) < 130:
+        out["verdict"] = "Insufficient history"
+        return out
+    try:
+        spy = get_price_history("SPY", period="2y")["Close"].squeeze()
+    except Exception:
+        out["verdict"] = "Benchmark data unavailable"
+        return out
+
+    windows = (("r3m", 63, 0.5), ("r6m", 126, 0.3), ("r12m", 252, 0.2))
+    rel_parts, weight_sum = [], 0.0
+    for key, days, wt in windows:
+        if len(close) <= days or len(spy) <= days:
+            continue
+        r_stock = trailing_return(close, days)
+        r_spy   = trailing_return(spy, days)
+        if r_stock is None or r_spy is None:
+            continue
+        out[key] = round((r_stock - r_spy) * 100, 1)
+        rel_parts.append((r_stock - r_spy) * wt)
+        weight_sum += wt
+    if not rel_parts or weight_sum == 0:
+        out["verdict"] = "Insufficient overlapping history"
+        return out
+
+    composite = sum(rel_parts) / weight_sum
+    out["composite_pct"] = round(composite * 100, 1)
+    score = 5 + composite * 15
+    out["score"] = round(max(1.0, min(10.0, score)), 1)
+
+    if percentile is not None:
+        if percentile >= 90:
+            out["verdict"] = f"TOP DECILE (P{percentile:.0f}) — leadership by Kirkpatrick's own standard"
+        elif percentile >= 70:
+            out["verdict"] = f"Strong relative strength (P{percentile:.0f})"
+        elif percentile <= 20:
+            out["verdict"] = f"Laggard (P{percentile:.0f}) — relative-strength systems avoid this"
+        else:
+            out["verdict"] = f"Mid-pack relative strength (P{percentile:.0f})"
+    elif out["score"] >= 7.5:
+        out["verdict"] = "STRONG relative strength across windows — leadership behavior"
+    elif out["score"] <= 3.5:
+        out["verdict"] = "WEAK relative strength — lagging the market on every window"
+    else:
+        out["verdict"] = "Mixed relative strength — no clear leader-or-laggard signal"
+    return out
+
+
+# ─── Combined verdict — equal-weighted across every model above ──────────────
+
+def combined_verdict(fm: dict) -> dict:
+    """Equal-weighted read across every mechanical model/checklist in this
+    module. Deliberately NOT tilted toward growth/momentum/tech even though
+    that may be the user's own bias — every method counts once, same weight,
+    so the panel can surface disagreement (e.g. value gurus vs momentum
+    systems) instead of quietly confirming what you already believe."""
+    scores: dict[str, float] = {}
+
+    m = fm.get("minervini", {})
+    if m.get("total"):
+        scores["Minervini Trend Template"] = m["passed"] / m["total"] * 10
+
+    t = fm.get("turtle", {})
+    def _turtle_pt(sig):
+        if not sig or sig == "N/A": return None
+        if "LONG BREAKOUT" in sig: return 9
+        if "EXIT ZONE" in sig:     return 2
+        return 5
+    t_pts = [p for p in (_turtle_pt(t.get("s1")), _turtle_pt(t.get("s2"))) if p is not None]
+    if t_pts:
+        scores["Turtle Breakout"] = sum(t_pts) / len(t_pts)
+
+    tr = fm.get("trend", {})
+    tr_map = {"LONG": 9, "SHORT/AVOID": 1, "MIXED": 5}
+    if tr.get("signal") in tr_map:
+        scores["Managed-Futures Trend"] = tr_map[tr["signal"]]
+
+    dr = fm.get("druck", {})
+    if dr.get("points"):
+        n = len(dr["points"])
+        n_ok = sum(1 for e, _ in dr["points"] if e == "✅")
+        scores["Druckenmiller Playbook"] = n_ok / n * 10
+
+    ke = fm.get("kelly", {})
+    if ke.get("kelly") is not None:
+        scores["Kelly Sizing"] = max(0.0, min(10.0, (ke["kelly"] + 25) / 50 * 10))
+
+    fa = fm.get("factors", {})
+    if fa.get("scores"):
+        scores["Factor Profile"] = sum(fa["scores"].values()) / len(fa["scores"])
+
+    bf = fm.get("buffett", {})
+    if bf.get("total"):
+        scores["Buffett"] = bf["passed"] / bf["total"] * 10
+
+    ly = fm.get("lynch", {})
+    peg = ly.get("peg")
+    if peg is not None:
+        scores["Lynch"] = 9 if peg < 1 else 6 if peg <= 2 else 3
+
+    gr = fm.get("graham", {})
+    margin = gr.get("margin")
+    if margin is not None:
+        scores["Graham"] = 9 if margin >= 30 else 6 if margin >= 0 else 3
+
+    bg = fm.get("bogle", {})
+    if bg.get("verdict"):
+        scores["Bogle"] = 9 if ("every window" in bg["verdict"] and "Beat" in bg["verdict"]) else 4
+
+    mg = fm.get("munger", {})
+    if "flags" in mg:
+        scores["Munger"] = max(1, 10 - 2 * len(mg["flags"]))
+
+    gb = fm.get("greenblatt", {})
+    if gb.get("verdict"):
+        scores["Greenblatt"] = (9 if "CANDIDATE" in gb["verdict"] else
+                                 6 if "GOOD BUSINESS" in gb["verdict"] else 4)
+
+    cs = fm.get("canslim", {})
+    if cs.get("total"):
+        scores["CANSLIM"] = cs["passed"] / cs["total"] * 10
+
+    pi = fm.get("piotroski", {})
+    if pi.get("score") is not None:
+        scores["Piotroski F-Score"] = pi["score"] / 9 * 10
+
+    az = fm.get("altman", {})
+    if az.get("z") is not None:
+        scores["Altman Z-Score"] = 9 if az["z"] > 2.99 else 5 if az["z"] >= 1.81 else 1
+
+    tm = fm.get("templeton", {})
+    tm_map = {"good": 8, "warn": 5, "bad": 2, "na": 5}
+    if tm.get("color") in tm_map:
+        scores["Templeton"] = tm_map[tm["color"]]
+
+    osh = fm.get("oshaughnessy", {})
+    if osh.get("total"):
+        scores["O'Shaughnessy Cornerstone"] = osh["passed"] / osh["total"] * 10
+
+    kp = fm.get("kirkpatrick", {})
+    if kp.get("score") is not None:
+        scores["Kirkpatrick RS"] = kp["score"]
+
+    if not scores:
+        return {"score": None, "label": "N/A", "color": "#556070",
+                "n_bullish": 0, "n_bearish": 0, "n_neutral": 0,
+                "n_total": 0, "breakdown": {}}
+
+    avg = sum(scores.values()) / len(scores)
+    n_bull    = sum(1 for v in scores.values() if v >= 7)
+    n_bear    = sum(1 for v in scores.values() if v <= 3)
+    n_neutral = len(scores) - n_bull - n_bear
+
+    if avg >= 7:     label, color = "BULLISH CONSENSUS",     "#16c784"
+    elif avg >= 5.5: label, color = "LEAN BULLISH",           "#a3e635"
+    elif avg >= 4.5: label, color = "MIXED / NO CONSENSUS",   "#f0b90b"
+    elif avg >= 3:   label, color = "LEAN BEARISH",           "#f97316"
+    else:            label, color = "BEARISH CONSENSUS",      "#ea3a44"
+
+    return {
+        "score": round(avg, 1), "label": label, "color": color,
+        "n_bullish": n_bull, "n_bearish": n_bear, "n_neutral": n_neutral,
+        "n_total": len(scores), "breakdown": scores,
+    }

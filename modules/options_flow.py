@@ -2,8 +2,6 @@
 Options flow analysis — call/put volume ratio, open interest bias,
 near-the-money call activity. Scores bullish options sentiment 1-10.
 """
-import numpy as np
-import pandas as pd
 import streamlit as st
 import yfinance as yf
 

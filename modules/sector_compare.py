@@ -2,7 +2,6 @@
 Sector & Peer comparison module.
 """
 import pandas as pd
-import numpy as np
 import streamlit as st
 from utils.cache import get_ticker_info, get_price_history
 from config import PEER_GROUPS
@@ -35,7 +34,13 @@ def _get_peers(symbol: str, info: dict) -> list[str]:
         )
         peers = _json.loads(extract_json(msg.content[0].text))
         if isinstance(peers, list):
-            return [p.upper() for p in peers if isinstance(p, str)][:5]
+            # Haiku occasionally hallucinates tickers that don't exist on
+            # yfinance (e.g. "VIAVI", "SENSORMATIC" instead of real symbols) —
+            # validate before returning so the comparison table doesn't fill
+            # with failed-download rows for uncurated (mostly small-cap) names.
+            candidates = [p.upper() for p in peers if isinstance(p, str)][:8]
+            valid = [p for p in candidates if get_ticker_info(p).get("regularMarketPrice") is not None]
+            return valid[:5]
     except Exception:
         pass
     return []
@@ -62,6 +67,9 @@ def analyze(symbol: str) -> dict:
         r1m  = _perf(sym, 21)
         r3m  = _perf(sym, 63)
         r1y  = _perf(sym, 252)
+        _fcf = i.get("freeCashflow")
+        _rev = i.get("totalRevenue")
+        _de  = i.get("debtToEquity")
         rows.append({
             "Ticker":       sym,
             "Name":         i.get("shortName", sym),
@@ -71,6 +79,8 @@ def analyze(symbol: str) -> dict:
             "PEG":          i.get("pegRatio"),
             "Rev Growth":   i.get("revenueGrowth"),
             "Gross Margin": i.get("grossMargins"),
+            "FCF Margin":   (_fcf / _rev) if _fcf and _rev else None,
+            "Debt/Equity":  (_de / 100) if _de is not None else None,
             "1M Return":    r1m,
             "3M Return":    r3m,
             "1Y Return":    r1y,

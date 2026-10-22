@@ -3,10 +3,7 @@ AI-powered stock screener v2 — no fixed universe, full scoring, portfolio buil
 Claude suggests tickers freely → validate via yfinance → run full scoring model.
 """
 import json
-import anthropic
-import yfinance as yf
 import pandas as pd
-import numpy as np
 import streamlit as st
 from config import ANTHROPIC_API_KEY
 from utils.cache import get_ticker_info, get_price_history

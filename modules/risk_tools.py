@@ -280,6 +280,139 @@ def monte_carlo(symbols_weights: tuple, start_value: float,
         return {"error": str(e)}
 
 
+# ─── Risk of Ruin ─────────────────────────────────────────────────────────────
+
+def _solve_ruin_root(p: float, q: float, payoff: float) -> float:
+    """Root r in (0,1), r != 1, of p*r^(payoff+1) - r + q = 0 — the generalized
+    (unequal-step) gambler's-ruin equation for a random walk that wins +payoff
+    units with probability p and loses -1 unit with probability q. Ruin
+    probability from U units of capital is r^U. Returns 1.0 (ruin certain)
+    when the walk has no positive drift (p*payoff <= q)."""
+    if p * payoff <= q:
+        return 1.0
+
+    def g(r: float) -> float:
+        return p * (r ** (payoff + 1)) - r + q
+
+    xs = np.linspace(1e-6, 1 - 1e-9, 2000)
+    gs = p * (xs ** (payoff + 1)) - xs + q
+    for i in range(len(xs) - 1):
+        if gs[i] == 0:
+            return float(xs[i])
+        if gs[i] * gs[i + 1] < 0:
+            a, c = float(xs[i]), float(xs[i + 1])
+            for _ in range(60):
+                m = (a + c) / 2
+                if g(a) * g(m) < 0:
+                    c = m
+                else:
+                    a = m
+            return float((a + c) / 2)
+    return 1.0   # no sign change found in (0,1) → no root below 1, ruin certain
+
+
+def risk_of_ruin(win_rate: float, avg_win_pct: float, avg_loss_pct: float,
+                 risk_per_trade_pct: float, ruin_pct: float = 50.0) -> dict:
+    """
+    Payoff-adjusted Risk-of-Ruin: probability of losing `ruin_pct`% of capital
+    (in units of `risk_per_trade_pct` bets) before the edge compounds it up,
+    via the generalized (unequal win/loss size) gambler's-ruin equation.
+
+    Also reports the classic EVEN-MONEY formula (R = ((1-A)/(1+A))^U, A=p-q)
+    for comparison — it assumes wins and losses are the same size, which is
+    almost never true in trading (here payoff = avg_win/avg_loss), so it can
+    disagree sharply with the payoff-adjusted number and is shown for context
+    only, not used for the verdict.
+
+    win_rate                 — 0-1 historical win rate
+    avg_win_pct/avg_loss_pct — average % gain/loss per trade (loss as positive %)
+    risk_per_trade_pct       — % of capital risked per trade (fixed-fractional)
+    ruin_pct                 — drawdown %% treated as "ruin" (default 50%)
+    """
+    if not (0 < win_rate < 1) or avg_win_pct <= 0 or avg_loss_pct <= 0 or risk_per_trade_pct <= 0:
+        return {"error": "Need win_rate in (0,1) and positive win/loss/risk inputs."}
+
+    p, q = win_rate, 1 - win_rate
+    payoff = avg_win_pct / avg_loss_pct
+    units = ruin_pct / risk_per_trade_pct
+    expectancy = p * payoff - q   # in R-multiples (R = risk_per_trade)
+
+    # Classic even-money formula — for comparison only, see docstring.
+    edge_a = p - q
+    classic_ror = 1.0 if edge_a <= 0 else ((1 - edge_a) / (1 + edge_a)) ** units
+
+    # Payoff-adjusted (generalized gambler's ruin) — the number that drives the verdict.
+    root = _solve_ruin_root(p, q, payoff)
+    payoff_ror = min(1.0, root ** units)
+
+    if expectancy <= 0:
+        verdict = "NEGATIVE EXPECTANCY — ruin is a near-certainty over enough trades; fix the edge before sizing up."
+    elif payoff_ror >= 0.5:
+        verdict = f"Risk of Ruin {payoff_ror*100:.0f}% — too high; cut risk-per-trade or improve the edge."
+    elif payoff_ror >= 0.1:
+        verdict = f"Risk of Ruin {payoff_ror*100:.1f}% — elevated; most professional systems target under 1-5%."
+    else:
+        verdict = f"Risk of Ruin {payoff_ror*100:.2f}% — comfortably low at this sizing."
+
+    return {
+        "payoff_ror_pct":  round(payoff_ror * 100, 2),
+        "classic_ror_pct": round(classic_ror * 100, 2),
+        "expectancy_r":    round(expectancy, 3),
+        "payoff_ratio":    round(payoff, 2),
+        "edge":            round(edge_a, 3),
+        "verdict":         verdict,
+        "error":           None,
+    }
+
+
+# ─── Murphy's 20-Point Money Management Checklist ─────────────────────────────
+
+MURPHY_CHECKLIST: list[str] = [
+    "I have a written trading plan before entering",
+    "I never risk more than 5% of equity on a single trade",
+    "I always use a protective stop-loss order",
+    "I know my exit point BEFORE I enter",
+    "I don't add to a losing position (no averaging down)",
+    "I diversify — not everything in one market/sector",
+    "I don't overtrade relative to my account size",
+    "I keep leverage proportional to volatility, not maximized",
+    "I have a target reward/risk of at least 2:1 before entering",
+    "I cut losses quickly and let winners run",
+    "I don't let a winning trade turn into a loss (trail stops)",
+    "I review closed trades to learn, not just to relive them",
+    "I avoid trading right after a big loss out of frustration",
+    "I size positions the same way regardless of conviction 'feel'",
+    "I have a max daily/weekly loss limit and I honor it",
+    "I don't chase a market that has already moved sharply",
+    "I know my total portfolio risk, not just per-trade risk",
+    "I keep records of every trade with entry/exit rationale",
+    "I don't trade when emotionally compromised (revenge, euphoria)",
+    "I periodically re-test whether my edge still exists",
+]
+
+
+def murphy_checklist(answers: dict[int, bool]) -> dict:
+    """Score against Murphy's 20-point money-management checklist.
+    `answers`: {index (0-19): bool}. Missing indices count as not-yet-answered
+    (excluded from the denominator rather than counted as failures)."""
+    answered = {i: v for i, v in answers.items() if 0 <= i < len(MURPHY_CHECKLIST)}
+    total = len(answered)
+    passed = sum(1 for v in answered.values() if v)
+    if total == 0:
+        return {"passed": 0, "total": 0, "pct": None, "verdict": "Not yet answered", "items": MURPHY_CHECKLIST}
+    pct = passed / total * 100
+    if pct >= 90:
+        verdict = "DISCIPLINED — money management is not the leak in this system"
+    elif pct >= 70:
+        verdict = "MOSTLY SOUND — a few gaps worth tightening"
+    elif pct >= 40:
+        verdict = "LEAKY — money-management gaps are likely costing more than bad picks"
+    else:
+        verdict = "HIGH RISK OF RUIN — the checklist itself IS the strategy fix needed here"
+    return {"passed": passed, "total": total, "pct": round(pct, 0),
+            "verdict": verdict, "items": MURPHY_CHECKLIST}
+
+
 # ─── What-If simulator ────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=1800, show_spinner=False)
