@@ -900,13 +900,15 @@ if page == "🔍 Analyze":
             st.caption("Could not load market movers right now.")
         for _title, _rows in _hot.items():
             st.caption(_title)
-            _cols = st.columns(len(_rows))
+            _cols = st.columns(4)   # 4 per row so labels like "NVDA +2.5%" are not cut off
             for _i, _r in enumerate(_rows):
+                if _i and _i % 4 == 0:
+                    _cols = st.columns(4)
                 if "change_pct" in _r and _r["change_pct"] is not None:
                     _lbl = f'{_r["symbol"]} {_r["change_pct"]:+.1f}%'
                 else:
                     _lbl = f'{_r["symbol"]} · {_r.get("date", "")[5:]}'
-                if _cols[_i].button(_lbl, key=f"_hot_{_title}_{_r['symbol']}", width="stretch"):
+                if _cols[_i % 4].button(_lbl, key=f"_hot_{_title}_{_r['symbol']}", width="stretch"):
                     st.session_state["symbol"] = st.session_state["_az_sym"] = _r["symbol"]
                     st.rerun()
 
