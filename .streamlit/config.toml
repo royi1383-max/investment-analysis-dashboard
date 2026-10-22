@@ -3,3 +3,5 @@ gatherUsageStats = false
 
 [server]
 headless = true
+# Only reachable from this computer (not from other devices on the network).
+address = "127.0.0.1"

@@ -26,3 +26,12 @@ _zip_preview/
 
 # Redundant local launcher (Hebrew) — use setup_and_run.bat instead
 הפעל_דשבורד.bat
+
+# Local-only files
+.venv/
+.pytest_cache/
+.sector_rotation_snapshot.json
+graphify-out/
+CLAUDE.md
+NUL
+_UL

@@ -22,6 +22,9 @@ Python, Streamlit, pandas, numpy, plotly, yfinance, Finnhub, FRED API, Anthropic
 ## Setup
 
 ```bash
+# Windows: just double-click setup_and_run.bat (creates a private environment, installs, launches)
+# Manual (Python 3.12+):
+python -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env   # fill in your own API keys
 streamlit run app.py
