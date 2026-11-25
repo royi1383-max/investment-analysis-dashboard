@@ -14,6 +14,11 @@ from modules import new_money as nm
 _BUCKET_COLORS = {"core": "#4da3ff", "sectors": "#a3e635", "qos": "#16c784", "reserve": "#8a94a6"}
 
 
+def _md(s: str) -> str:
+    """Escape '$' so st.markdown doesn't render "$81 … ($100)" as LaTeX."""
+    return s.replace("$", "\\$")
+
+
 def _fx_usdils() -> float | None:
     try:
         from utils.cache import get_price_history
@@ -264,8 +269,8 @@ def _render_plan(plan: dict, sig: dict, fx: float) -> None:
     if plan["tranches"]:
         st.markdown('<div class="panel-head">RESERVE — WHEN THE REST GOES IN</div>', unsafe_allow_html=True)
         for i, t in enumerate(plan["tranches"], 1):
-            st.markdown(f"**Tranche {i} — ${t['amount']:,.0f} (₪{t['amount']*fx:,.0f})** · "
-                        f"{t['when']}. → {t['into']}.")
+            st.markdown(_md(f"**Tranche {i} — ${t['amount']:,.0f} (₪{t['amount']*fx:,.0f})** · "
+                            f"{t['when']}. → {t['into']}."))
 
     # ── Watchlist / skipped ───────────────────────────────────────────────────
     w_col, s_col = st.columns(2)
@@ -286,8 +291,8 @@ def _render_plan(plan: dict, sig: dict, fx: float) -> None:
                     unsafe_allow_html=True)
         if plan["skipped"]:
             for s in plan["skipped"]:
-                st.markdown(f"- **{_html.escape(s['ticker'])}** {_html.escape(s.get('name') or '')} — "
-                            f"{_html.escape(s['reason'])}")
+                st.markdown(_md(f"- **{_html.escape(s['ticker'])}** {_html.escape(s.get('name') or '')} — "
+                                f"{_html.escape(s['reason'])}"))
         else:
             st.caption("Nothing was blocked by caps or minimum trade size.")
 
