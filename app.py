@@ -61,6 +61,7 @@ import modules.score_validation as mod_sv
 import modules.trading_psychology as mod_psych
 import modules.options_pricing   as mod_opt
 import modules.portfolio_optimizer as mod_popt
+import modules.new_money_page as mod_nm_page
 from modules.historical import METRICS_CATALOG
 from config import FINNHUB_API_KEY
 
@@ -737,6 +738,7 @@ with st.sidebar:
     page = st.radio(
         "Navigation",
         ["🔍 Analyze",
+         "💰 New Money",
          "⭐ Weekly Picks",
          "🏥 Market Health", "🔄 Sector Rotation", "📰 News Feed",
          "🔎 AI Screener", "🌍 Market Radar",
@@ -4858,6 +4860,9 @@ elif page == "👁 Watchlist":
 
 
 # ─── Page: Weekly Picks ──────────────────────────────────────────────────────
+elif page == "💰 New Money":
+    mod_nm_page.render()
+
 elif page == "⭐ Weekly Picks":
     import datetime as _dt_wp
     _wp_week_num = _dt_wp.date.today().isocalendar()[1]
